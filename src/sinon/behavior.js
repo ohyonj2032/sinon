@@ -14,6 +14,45 @@ const slice = arrayProto.slice;
 const useLeftMostCallback = -1;
 const useRightMostCallback = -2;
 
+function isThenable(value) {
+    return (
+        value !== null &&
+        value !== undefined &&
+        typeof value.then === "function"
+    );
+}
+
+function wrapThenableForStub(thenable, behavior) {
+    var wrappedThenable = {
+        then: function (onFulfilled, onRejected) {
+            var result;
+
+            try {
+                result = thenable.then(onFulfilled, onRejected);
+            } catch (e) {
+                if (typeof onRejected === "function") {
+                    return onRejected(e);
+                }
+                throw e;
+            }
+
+            if (result && typeof result.then === "function") {
+                return wrapThenableForStub(result, behavior);
+            }
+
+            return result;
+        },
+    };
+
+    if (typeof thenable.catch === "function") {
+        wrappedThenable.catch = function (onRejected) {
+            return wrappedThenable.then(null, onRejected);
+        };
+    }
+
+    return wrappedThenable;
+}
+
 function getCallback(behavior, args) {
     const callArgAt = behavior.callArgAt;
 
@@ -188,7 +227,16 @@ const proto = {
         } else if (this.callsThrough) {
             const wrappedMethod = this.effectiveWrappedMethod();
 
-            return wrappedMethod.apply(context, args);
+            const originalResult = wrappedMethod.apply(context, args);
+
+            if (
+                this.returnValueDefined &&
+                isThenable(this.returnValue)
+            ) {
+                return wrapThenableForStub(this.returnValue, this);
+            }
+
+            return originalResult;
         } else if (this.callsThroughWithNew) {
             // Get the original method (assumed to be a constructor in this case)
             const WrappedClass = this.effectiveWrappedMethod();
@@ -200,7 +248,10 @@ const proto = {
                 concat([null], argsArray),
             );
             return new F();
-        } else if (typeof this.returnValue !== "undefined") {
+        } else if (this.returnValueDefined) {
+            if (isThenable(this.returnValue)) {
+                return wrapThenableForStub(this.returnValue, this);
+            }
             return this.returnValue;
         } else if (typeof this.callArgAt === "number") {
             return returnValue;

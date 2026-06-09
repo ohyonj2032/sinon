@@ -151,6 +151,16 @@ const defaultBehaviors = {
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
+
+        if (
+            value !== null &&
+            value !== undefined &&
+            typeof value.then === "function"
+        ) {
+            fake.returnValueIsThenable = true;
+        } else {
+            fake.returnValueIsThenable = false;
+        }
     },
 
     returnsArg: function returnsArg(fake, index) {
@@ -253,14 +263,17 @@ const defaultBehaviors = {
         fake.resolveThis = false;
         fake.returnArgAt = undefined;
         fake.returnThis = false;
-        fake.returnValue = undefined;
         fake.throwArgAt = undefined;
 
         fake.callArgProp = undefined;
         fake.callbackArguments = [];
         fake.callbackContext = undefined;
         fake.callbackAsync = false;
-        fake.returnValueDefined = false;
+
+        if (!fake.returnValueIsThenable) {
+            fake.returnValue = undefined;
+            fake.returnValueDefined = false;
+        }
     },
 
     callThroughWithNew: function callThroughWithNew(fake) {
