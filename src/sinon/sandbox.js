@@ -11,6 +11,12 @@ import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
 
+// Shared WeakMap tracking ESM namespace proxies.  See src/sinon/stub.js for
+// the authoritative definition; we grab the reference here so sandbox.restore()
+// can sever proxy → stub links even though the underlying ESM binding is
+// immutable.
+const esmStubRegistry = sinonStub.__esmStubRegistry;
+
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
 const { createMatcher: match } = samsam;
@@ -130,6 +136,10 @@ export default function Sandbox(opts = {}) {
             return sandbox.stub.apply(null, arguments);
         };
 
+        obj.stubESM = function stubESM() {
+            return sandbox.stubESM.apply(null, arguments);
+        };
+
         obj.mock = function mock() {
             return sandbox.mock.apply(null, arguments);
         };
@@ -237,6 +247,38 @@ export default function Sandbox(opts = {}) {
     });
     extend(sandbox.stub, sinonStub);
 
+    sandbox.stubESM = function stubESM(namespace, prop) {
+        // Forward to the ESM-aware implementation in ./stub.js.  It returns a
+        // Proxy around `namespace`; the real sinon-stub function it hands
+        // out is reachable via `ns[prop]` and is also registered in the
+        // shared `esmStubRegistry` WeakMap.
+        const proxiedNs = sinonStub.stubESM(namespace, prop);
+        const entry = esmStubRegistry && esmStubRegistry.get(proxiedNs);
+        if (entry && entry.stub) {
+            // Track the underlying stub so .verify() / .resetHistory() /
+            // .resetBehavior() work on it.  `addToCollection` is idempotent
+            // for the purposes of sandbox.restore() – but the restore()
+            // function on an ESM stub does NOT touch the (immutable)
+            // namespace; it simply clears the WeakMap entry, which in turn
+            // makes the Proxy fall through to the real export.
+            //
+            // We also keep a back-reference from the stub to its owning
+            // proxy so sandbox.restore() can locate the right WeakMap entry
+            // without needing to iterate the (un-iterable) WeakMap.
+            entry.stub.__sinonESMProxy__ = proxiedNs;
+            addToCollection(entry.stub);
+        }
+        return proxiedNs;
+    };
+    Object.defineProperty(sandbox.stubESM, "name", {
+        value: "stubESM",
+        configurable: true,
+    });
+    Object.defineProperty(sandbox.stubESM, "length", {
+        value: 2,
+        configurable: true,
+    });
+
     sandbox.mock = function () {
         const m = sinonMock.apply(null, arguments);
 
@@ -305,6 +347,36 @@ export default function Sandbox(opts = {}) {
             restorer();
         });
         fakeRestorers.length = 0;
+
+        // Two-pass restore.  The first pass cleans up every ESM-namespace
+        // proxy that was registered through `sandbox.stubESM` by severing
+        // the proxy → stub link via the shared WeakMap.  After that, the
+        // normal second pass (which calls .restore() on every fake) is safe
+        // for ESM stubs too – they carry a custom restore() that does NOT
+        // try to write to the immutable namespace, so nothing throws.
+        forEach(collection, function (fake) {
+            if (fake && fake.isESMStub && esmStubRegistry) {
+                // Walk over every entry in the registry and kill any that
+                // reference this stub.  (A single stub cannot be keyed
+                // directly in a WeakMap of proxies, so we enumerate.)
+                //
+                // Note: WeakMap has no built-in iteration – that's by
+                // design.  We therefore piggy-back on the book-keeping we
+                // already did in `sandbox.stubESM` by asking the stub for
+                // its owning proxy reference: the stub exposes `rootObj`
+                // (the namespace) and `propName`, but that's not enough to
+                // locate the proxy.  To bridge the gap we stash a
+                // `__sinonESMProxy__` reference on the stub itself (see
+                // below).
+                if (fake.__sinonESMProxy__) {
+                    const entry = esmStubRegistry.get(fake.__sinonESMProxy__);
+                    if (entry) {
+                        entry.stub = null;
+                    }
+                    fake.__sinonESMProxy__ = null;
+                }
+            }
+        });
 
         reverse(collection);
         applyOnEach(collection, "restore");

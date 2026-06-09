@@ -23,6 +23,151 @@ const sort = arrayProto.sort;
 
 let uuid = 0;
 
+/* ---------------------------------------------------------------------------
+ * ESM stub support
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Tracks the currently active ESM-namespace proxies so sandbox.restore() can
+ * "switch them off" even though the underlying ESM binding is immutable.
+ *
+ * The map is keyed by the returned Proxy object (the user-facing one) and
+ * holds a descriptor object:
+ *   { namespace: object, prop: string, stub: function | null }
+ * Setting `stub` to `null` has the effect of disabling the interception; the
+ * proxy thereafter falls through to the real namespace binding.
+ */
+const esmStubRegistry = new WeakMap();
+stub.__esmStubRegistry = esmStubRegistry;
+
+/**
+ * Create a stub backed by a Proxy that wraps an ESM namespace.
+ *
+ * The returned object acts as the namespace: reads of every property but
+ * `prop` are forwarded unchanged to `namespace`.  Reads of `prop` return a
+ * sinon stub function that goes through the normal `invoke` /
+ * `getCurrentBehavior` pipeline, so `.callCount`, `.returns()`, `.resolves()`
+ * etc. all work the same way they do for regular stubs.
+ *
+ * The proxy is registered with a WeakMap (see `esmStubRegistry`) so that
+ * sandbox.restore() can sever the link between the proxy and the stub without
+ * ever touching the (immutable) namespace object.
+ *
+ * @param {object} namespace  ESM namespace record
+ * @param {string} prop       name of the export to stub
+ * @returns {Proxy<object>}   the proxied namespace
+ */
+function stubESM(namespace, prop) {
+    if (!namespace || typeof namespace !== "object") {
+        throw new TypeError("stubESM requires a namespace object");
+    }
+    if (typeof prop !== "string" && typeof prop !== "symbol") {
+        throw new TypeError("stubESM requires a property name");
+    }
+
+    // Make sure the property actually exists on the namespace; ESM
+    // namespaces reflect every export as an own (and usually frozen) property.
+    if (!(prop in namespace)) {
+        throw new TypeError(
+            `Cannot stub non-existent export ${valueToString(prop)}`,
+        );
+    }
+
+    const originalFunc =
+        typeof namespace[prop] === "function" ? namespace[prop] : null;
+    const sinonStubInstance = createStub(originalFunc);
+
+    // Mark the stub so sandbox.restore() knows about it.  The "restore"
+    // method of a normal stub walks the original object via
+    // Object.defineProperty – which is impossible on a frozen namespace.
+    // Instead we expose a no-op restore; the real cleanup lives in the
+    // WeakMap entry below.
+    extend.nonEnum(sinonStubInstance, {
+        rootObj: namespace,
+        propName: prop,
+        shadowsPropOnPrototype: false,
+        isESMStub: true,
+        restore: function restore() {
+            // See esmStubRegistry – actual teardown happens in sandbox.js
+            // via the shared WeakMap.  We still expose a restore() for
+            // parity with regular stubs; calling it directly just severs
+            // this particular proxy → stub link.
+            const entry = esmStubRegistry.get(proxy);
+            if (entry) {
+                entry.stub = null;
+            }
+        },
+    });
+
+    const handler = {
+        get(target, key, receiver) {
+            if (key === prop) {
+                const entry = esmStubRegistry.get(proxy);
+                // If the stub has been "restored" (entry.stub === null),
+                // fall through to the real namespace value.
+                if (entry && entry.stub) {
+                    return entry.stub;
+                }
+            }
+            // Preserve `this`-binding for methods forwarded to the real
+            // namespace (i.e. still point to the original namespace).
+            const value = Reflect.get(target, key, target);
+            if (typeof value === "function") {
+                return value.bind(target);
+            }
+            return value;
+        },
+
+        has(target, key) {
+            return Reflect.has(target, key);
+        },
+
+        ownKeys(target) {
+            return Reflect.ownKeys(target);
+        },
+
+        getOwnPropertyDescriptor(target, key) {
+            const desc = Reflect.getOwnPropertyDescriptor(target, key);
+            if (!desc) return desc;
+            // ESM namespaces expose enumerable own properties; keep them that
+            // way, but lift configurable to true when returning the descriptor
+            // for our stubbed property so consumers can still introspect it.
+            if (key === prop) {
+                return {
+                    ...desc,
+                    configurable: true,
+                    writable: true,
+                };
+            }
+            return desc;
+        },
+    };
+
+    const proxy = new Proxy(namespace, handler);
+    esmStubRegistry.set(proxy, {
+        namespace,
+        prop,
+        stub: sinonStubInstance,
+    });
+
+    // Also expose the underlying stub on the proxy itself for advanced
+    // callers that want to call `.withArgs()`, `.onCall()`, etc. on the
+    // stub directly without going through `proxy[prop]` first.
+    try {
+        Object.defineProperty(proxy, "__sinonStub__", {
+            value: sinonStubInstance,
+            configurable: true,
+            enumerable: false,
+            writable: true,
+        });
+    } catch (e) {
+        // ignore – frozen namespace; this is a best-effort convenience
+    }
+
+    return proxy;
+}
+stub.stubESM = stubESM;
+
 function createStub(originalFunc) {
     // eslint-disable-next-line prefer-const
     let proxy;

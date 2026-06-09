@@ -1,0 +1,289 @@
+diff --git a/src/sinon.js b/src/sinon.js
+index 4f2ad9d7..f3b36a2e 100644
+--- a/src/sinon.js
++++ b/src/sinon.js
+@@ -1,5 +1,24 @@
+ import createApi from "./create-sinon-api.js";
++import sinonStub from "./sinon/stub.js";
+ 
+ const sinon = createApi();
+ 
++/**
++ * Stubs a named export on an ES Module namespace object.
++ *
++ * Because ESM namespace bindings are immutable (non-writable,
++ * non-configurable), the usual `Object.defineProperty` trick used by
++ * `stub` cannot work.  Instead, `stubESM` returns a Proxy that wraps
++ * the original namespace: reads to `prop` return a sinon stub function
++ * (seamlessly integrated with the spy/stub API), while every other
++ * property transparently falls through to the real namespace.
++ *
++ * @param {object} namespace  The ESM namespace record (e.g. the result of `import * as ns`)
++ * @param {string} prop    The name of the exported binding to stub
++ * @returns {Proxy<object>} A proxy around `namespace` that intercepts `prop`
++ */
++sinon.stubESM = function stubESM(namespace, prop) {
++    return sinonStub.stubESM(namespace, prop);
++};
++
+ export default sinon;
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..434af84d 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -11,6 +11,12 @@ import sinonCreateStubInstance from "./create-stub-instance.js";
+ import sinonFake from "./fake.js";
+ import extend from "./util/core/extend.js";
+ 
++// Shared WeakMap tracking ESM namespace proxies.  See src/sinon/stub.js for
++// the authoritative definition; we grab the reference here so sandbox.restore()
++// can sever proxy → stub links even though the underlying ESM binding is
++// immutable.
++const esmStubRegistry = sinonStub.__esmStubRegistry;
++
+ const { array: arrayProto } = commons.prototypes;
+ const { deprecated: logger, valueToString } = commons;
+ const { createMatcher: match } = samsam;
+@@ -130,6 +136,10 @@ export default function Sandbox(opts = {}) {
+             return sandbox.stub.apply(null, arguments);
+         };
+ 
++        obj.stubESM = function stubESM() {
++            return sandbox.stubESM.apply(null, arguments);
++        };
++
+         obj.mock = function mock() {
+             return sandbox.mock.apply(null, arguments);
+         };
+@@ -237,6 +247,38 @@ export default function Sandbox(opts = {}) {
+     });
+     extend(sandbox.stub, sinonStub);
+ 
++    sandbox.stubESM = function stubESM(namespace, prop) {
++        // Forward to the ESM-aware implementation in ./stub.js.  It returns a
++        // Proxy around `namespace`; the real sinon-stub function it hands
++        // out is reachable via `ns[prop]` and is also registered in the
++        // shared `esmStubRegistry` WeakMap.
++        const proxiedNs = sinonStub.stubESM(namespace, prop);
++        const entry = esmStubRegistry && esmStubRegistry.get(proxiedNs);
++        if (entry && entry.stub) {
++            // Track the underlying stub so .verify() / .resetHistory() /
++            // .resetBehavior() work on it.  `addToCollection` is idempotent
++            // for the purposes of sandbox.restore() – but the restore()
++            // function on an ESM stub does NOT touch the (immutable)
++            // namespace; it simply clears the WeakMap entry, which in turn
++            // makes the Proxy fall through to the real export.
++            //
++            // We also keep a back-reference from the stub to its owning
++            // proxy so sandbox.restore() can locate the right WeakMap entry
++            // without needing to iterate the (un-iterable) WeakMap.
++            entry.stub.__sinonESMProxy__ = proxiedNs;
++            addToCollection(entry.stub);
++        }
++        return proxiedNs;
++    };
++    Object.defineProperty(sandbox.stubESM, "name", {
++        value: "stubESM",
++        configurable: true,
++    });
++    Object.defineProperty(sandbox.stubESM, "length", {
++        value: 2,
++        configurable: true,
++    });
++
+     sandbox.mock = function () {
+         const m = sinonMock.apply(null, arguments);
+ 
+@@ -306,6 +348,36 @@ export default function Sandbox(opts = {}) {
+         });
+         fakeRestorers.length = 0;
+ 
++        // Two-pass restore.  The first pass cleans up every ESM-namespace
++        // proxy that was registered through `sandbox.stubESM` by severing
++        // the proxy → stub link via the shared WeakMap.  After that, the
++        // normal second pass (which calls .restore() on every fake) is safe
++        // for ESM stubs too – they carry a custom restore() that does NOT
++        // try to write to the immutable namespace, so nothing throws.
++        forEach(collection, function (fake) {
++            if (fake && fake.isESMStub && esmStubRegistry) {
++                // Walk over every entry in the registry and kill any that
++                // reference this stub.  (A single stub cannot be keyed
++                // directly in a WeakMap of proxies, so we enumerate.)
++                //
++                // Note: WeakMap has no built-in iteration – that's by
++                // design.  We therefore piggy-back on the book-keeping we
++                // already did in `sandbox.stubESM` by asking the stub for
++                // its owning proxy reference: the stub exposes `rootObj`
++                // (the namespace) and `propName`, but that's not enough to
++                // locate the proxy.  To bridge the gap we stash a
++                // `__sinonESMProxy__` reference on the stub itself (see
++                // below).
++                if (fake.__sinonESMProxy__) {
++                    const entry = esmStubRegistry.get(fake.__sinonESMProxy__);
++                    if (entry) {
++                        entry.stub = null;
++                    }
++                    fake.__sinonESMProxy__ = null;
++                }
++            }
++        });
++
+         reverse(collection);
+         applyOnEach(collection, "restore");
+         collection = [];
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..0380e408 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -23,6 +23,151 @@ const sort = arrayProto.sort;
+ 
+ let uuid = 0;
+ 
++/* ---------------------------------------------------------------------------
++ * ESM stub support
++ * ------------------------------------------------------------------------- */
++
++/**
++ * Tracks the currently active ESM-namespace proxies so sandbox.restore() can
++ * "switch them off" even though the underlying ESM binding is immutable.
++ *
++ * The map is keyed by the returned Proxy object (the user-facing one) and
++ * holds a descriptor object:
++ *   { namespace: object, prop: string, stub: function | null }
++ * Setting `stub` to `null` has the effect of disabling the interception; the
++ * proxy thereafter falls through to the real namespace binding.
++ */
++const esmStubRegistry = new WeakMap();
++stub.__esmStubRegistry = esmStubRegistry;
++
++/**
++ * Create a stub backed by a Proxy that wraps an ESM namespace.
++ *
++ * The returned object acts as the namespace: reads of every property but
++ * `prop` are forwarded unchanged to `namespace`.  Reads of `prop` return a
++ * sinon stub function that goes through the normal `invoke` /
++ * `getCurrentBehavior` pipeline, so `.callCount`, `.returns()`, `.resolves()`
++ * etc. all work the same way they do for regular stubs.
++ *
++ * The proxy is registered with a WeakMap (see `esmStubRegistry`) so that
++ * sandbox.restore() can sever the link between the proxy and the stub without
++ * ever touching the (immutable) namespace object.
++ *
++ * @param {object} namespace  ESM namespace record
++ * @param {string} prop       name of the export to stub
++ * @returns {Proxy<object>}   the proxied namespace
++ */
++function stubESM(namespace, prop) {
++    if (!namespace || typeof namespace !== "object") {
++        throw new TypeError("stubESM requires a namespace object");
++    }
++    if (typeof prop !== "string" && typeof prop !== "symbol") {
++        throw new TypeError("stubESM requires a property name");
++    }
++
++    // Make sure the property actually exists on the namespace; ESM
++    // namespaces reflect every export as an own (and usually frozen) property.
++    if (!(prop in namespace)) {
++        throw new TypeError(
++            `Cannot stub non-existent export ${valueToString(prop)}`,
++        );
++    }
++
++    const originalFunc =
++        typeof namespace[prop] === "function" ? namespace[prop] : null;
++    const sinonStubInstance = createStub(originalFunc);
++
++    // Mark the stub so sandbox.restore() knows about it.  The "restore"
++    // method of a normal stub walks the original object via
++    // Object.defineProperty – which is impossible on a frozen namespace.
++    // Instead we expose a no-op restore; the real cleanup lives in the
++    // WeakMap entry below.
++    extend.nonEnum(sinonStubInstance, {
++        rootObj: namespace,
++        propName: prop,
++        shadowsPropOnPrototype: false,
++        isESMStub: true,
++        restore: function restore() {
++            // See esmStubRegistry – actual teardown happens in sandbox.js
++            // via the shared WeakMap.  We still expose a restore() for
++            // parity with regular stubs; calling it directly just severs
++            // this particular proxy → stub link.
++            const entry = esmStubRegistry.get(proxy);
++            if (entry) {
++                entry.stub = null;
++            }
++        },
++    });
++
++    const handler = {
++        get(target, key, receiver) {
++            if (key === prop) {
++                const entry = esmStubRegistry.get(proxy);
++                // If the stub has been "restored" (entry.stub === null),
++                // fall through to the real namespace value.
++                if (entry && entry.stub) {
++                    return entry.stub;
++                }
++            }
++            // Preserve `this`-binding for methods forwarded to the real
++            // namespace (i.e. still point to the original namespace).
++            const value = Reflect.get(target, key, target);
++            if (typeof value === "function") {
++                return value.bind(target);
++            }
++            return value;
++        },
++
++        has(target, key) {
++            return Reflect.has(target, key);
++        },
++
++        ownKeys(target) {
++            return Reflect.ownKeys(target);
++        },
++
++        getOwnPropertyDescriptor(target, key) {
++            const desc = Reflect.getOwnPropertyDescriptor(target, key);
++            if (!desc) return desc;
++            // ESM namespaces expose enumerable own properties; keep them that
++            // way, but lift configurable to true when returning the descriptor
++            // for our stubbed property so consumers can still introspect it.
++            if (key === prop) {
++                return {
++                    ...desc,
++                    configurable: true,
++                    writable: true,
++                };
++            }
++            return desc;
++        },
++    };
++
++    const proxy = new Proxy(namespace, handler);
++    esmStubRegistry.set(proxy, {
++        namespace,
++        prop,
++        stub: sinonStubInstance,
++    });
++
++    // Also expose the underlying stub on the proxy itself for advanced
++    // callers that want to call `.withArgs()`, `.onCall()`, etc. on the
++    // stub directly without going through `proxy[prop]` first.
++    try {
++        Object.defineProperty(proxy, "__sinonStub__", {
++            value: sinonStubInstance,
++            configurable: true,
++            enumerable: false,
++            writable: true,
++        });
++    } catch (e) {
++        // ignore – frozen namespace; this is a best-effort convenience
++    }
++
++    return proxy;
++}
++stub.stubESM = stubESM;
++
+ function createStub(originalFunc) {
+     // eslint-disable-next-line prefer-const
+     let proxy;
