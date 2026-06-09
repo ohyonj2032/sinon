@@ -1,0 +1,69 @@
+diff --git a/src/sinon/behavior.js b/src/sinon/behavior.js
+index b8cb081c..6755b3ef 100644
+--- a/src/sinon/behavior.js
++++ b/src/sinon/behavior.js
+@@ -11,6 +11,39 @@ const join = arrayProto.join;
+ const reverse = arrayProto.reverse;
+ const slice = arrayProto.slice;
+ 
++function isThenable(value) {
++    return (
++        value !== null &&
++        typeof value === "object" &&
++        typeof value.then === "function" &&
++        typeof value.then !== "undefined"
++    );
++}
++
++function handleThenable(behavior, context, args, thenable) {
++    const promiseLibrary = behavior.promiseLibrary || Promise;
++    const stub = behavior.stub;
++
++    return promiseLibrary.resolve().then(function () {
++        return promiseLibrary.resolve(thenable).then(
++            function (result) {
++                if (behavior.callsThrough) {
++                    const wrappedMethod = behavior.effectiveWrappedMethod();
++                    return wrappedMethod.apply(context, args);
++                }
++                return result;
++            },
++            function (error) {
++                if (behavior.callsThrough) {
++                    const wrappedMethod = behavior.effectiveWrappedMethod();
++                    return wrappedMethod.apply(context, args);
++                }
++                throw error;
++            },
++        );
++    });
++}
++
+ const useLeftMostCallback = -1;
+ const useRightMostCallback = -2;
+ 
+@@ -187,8 +220,13 @@ const proto = {
+             return (this.promiseLibrary || Promise).reject(this.returnValue);
+         } else if (this.callsThrough) {
+             const wrappedMethod = this.effectiveWrappedMethod();
++            const result = wrappedMethod.apply(context, args);
++
++            if (isThenable(result)) {
++                return handleThenable(this, context, args, result);
++            }
+ 
+-            return wrappedMethod.apply(context, args);
++            return result;
+         } else if (this.callsThroughWithNew) {
+             // Get the original method (assumed to be a constructor in this case)
+             const WrappedClass = this.effectiveWrappedMethod();
+@@ -201,6 +239,9 @@ const proto = {
+             );
+             return new F();
+         } else if (typeof this.returnValue !== "undefined") {
++            if (isThenable(this.returnValue)) {
++                return handleThenable(this, context, args, this.returnValue);
++            }
+             return this.returnValue;
+         } else if (typeof this.callArgAt === "number") {
+             return returnValue;
