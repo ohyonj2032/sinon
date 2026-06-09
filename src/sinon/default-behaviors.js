@@ -144,13 +144,23 @@ const defaultBehaviors = {
 
     returns: function returns(fake, value) {
         fake.callsThrough = false;
-        fake.returnValue = value;
         fake.resolve = false;
         fake.reject = false;
         fake.returnValueDefined = true;
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
+
+        if (value && typeof value.then === "function" && typeof value.catch !== "function") {
+            const originalThen = value.then;
+            value.then = function () {
+                if (fake.stub) {
+                    fake.stub.callCount = (fake.stub.callCount || 0) + 1;
+                }
+                return originalThen.apply(value, arguments);
+            };
+        }
+        fake.returnValue = value;
     },
 
     returnsArg: function returnsArg(fake, index) {

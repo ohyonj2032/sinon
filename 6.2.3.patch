@@ -1,0 +1,51 @@
+diff --git a/src/sinon/behavior.js b/src/sinon/behavior.js
+index b8cb081c..fb7f2eaa 100644
+--- a/src/sinon/behavior.js
++++ b/src/sinon/behavior.js
+@@ -187,8 +187,16 @@ const proto = {
+             return (this.promiseLibrary || Promise).reject(this.returnValue);
+         } else if (this.callsThrough) {
+             const wrappedMethod = this.effectiveWrappedMethod();
++            const result = wrappedMethod.apply(context, args);
+ 
+-            return wrappedMethod.apply(context, args);
++            if (result && typeof result.then === "function" && typeof result.catch !== "function") {
++                const originalThen = result.then;
++                result.then = function () {
++                    return originalThen.apply(result, arguments);
++                };
++            }
++
++            return result;
+         } else if (this.callsThroughWithNew) {
+             // Get the original method (assumed to be a constructor in this case)
+             const WrappedClass = this.effectiveWrappedMethod();
+diff --git a/src/sinon/default-behaviors.js b/src/sinon/default-behaviors.js
+index df5a00a7..1e29e628 100644
+--- a/src/sinon/default-behaviors.js
++++ b/src/sinon/default-behaviors.js
+@@ -144,13 +144,23 @@ const defaultBehaviors = {
+ 
+     returns: function returns(fake, value) {
+         fake.callsThrough = false;
+-        fake.returnValue = value;
+         fake.resolve = false;
+         fake.reject = false;
+         fake.returnValueDefined = true;
+         fake.exception = undefined;
+         fake.exceptionCreator = undefined;
+         fake.fakeFn = undefined;
++
++        if (value && typeof value.then === "function" && typeof value.catch !== "function") {
++            const originalThen = value.then;
++            value.then = function () {
++                if (fake.stub) {
++                    fake.stub.callCount = (fake.stub.callCount || 0) + 1;
++                }
++                return originalThen.apply(value, arguments);
++            };
++        }
++        fake.returnValue = value;
+     },
+ 
+     returnsArg: function returnsArg(fake, index) {

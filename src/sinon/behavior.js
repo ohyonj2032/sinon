@@ -187,8 +187,16 @@ const proto = {
             return (this.promiseLibrary || Promise).reject(this.returnValue);
         } else if (this.callsThrough) {
             const wrappedMethod = this.effectiveWrappedMethod();
+            const result = wrappedMethod.apply(context, args);
 
-            return wrappedMethod.apply(context, args);
+            if (result && typeof result.then === "function" && typeof result.catch !== "function") {
+                const originalThen = result.then;
+                result.then = function () {
+                    return originalThen.apply(result, arguments);
+                };
+            }
+
+            return result;
         } else if (this.callsThroughWithNew) {
             // Get the original method (assumed to be a constructor in this case)
             const WrappedClass = this.effectiveWrappedMethod();
