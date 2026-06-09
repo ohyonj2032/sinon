@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
 import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
+import { getStubFromProxy } from "./util/core/proxy-esm-stub.js";
 
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
@@ -130,6 +131,10 @@ export default function Sandbox(opts = {}) {
             return sandbox.stub.apply(null, arguments);
         };
 
+        obj.stubESM = function stubESM() {
+            return sandbox.stubESM.apply(sandbox, arguments);
+        };
+
         obj.mock = function mock() {
             return sandbox.mock.apply(null, arguments);
         };
@@ -236,6 +241,25 @@ export default function Sandbox(opts = {}) {
         configurable: true,
     });
     extend(sandbox.stub, sinonStub);
+
+    sandbox.stubESM = function () {
+        const createdProxy = sinonStub.stubESM.apply(sinonStub, arguments);
+
+        const stub = getStubFromProxy(createdProxy);
+        if (stub) {
+            addToCollection(stub);
+        }
+
+        return createdProxy;
+    };
+    Object.defineProperty(sandbox.stubESM, "name", {
+        value: "stubESM",
+        configurable: true,
+    });
+    Object.defineProperty(sandbox.stubESM, "length", {
+        value: 2,
+        configurable: true,
+    });
 
     sandbox.mock = function () {
         const m = sinonMock.apply(null, arguments);

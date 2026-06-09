@@ -11,6 +11,8 @@ import sinonType from "./util/core/sinon-type.js";
 import wrapMethod from "./util/core/wrap-method.js";
 import throwOnFalsyObject from "./throw-on-falsy-object.js";
 import walkObject from "./util/core/walk-object.js";
+import createESMProxy from "./util/core/proxy-esm-stub.js";
+import { restoreESMProxy } from "./util/core/proxy-esm-stub.js";
 
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto, object: objectProto } = commonsPrototypes;
@@ -127,6 +129,37 @@ export default function stub(object, property) {
 
     return isStubbingNonFuncProperty ? s : wrapMethod(object, property, s);
 }
+
+export function stubESM(namespace, prop) {
+    if (typeof prop === "undefined") {
+        throw new TypeError("Cannot stub entire ES Module, please specify a single property");
+    }
+
+    const originalFunc = namespace[prop];
+    const isFunction = typeof originalFunc === "function";
+    const s = createStub(isFunction ? originalFunc : null);
+
+    extend.nonEnum(s, {
+        rootObj: namespace,
+        propName: prop,
+        isEsmStub: true,
+        restore: function restore() {
+            if (this.esmProxy) {
+                restoreESMProxy(this.esmProxy);
+            }
+        },
+    });
+
+    const esmRecord = createESMProxy(namespace, prop, s);
+
+    extend.nonEnum(s, {
+        esmProxy: esmRecord.proxy,
+    });
+
+    return esmRecord.proxy;
+}
+
+stub.stubESM = stubESM;
 
 function assertValidPropertyDescriptor(descriptor, property) {
     if (!descriptor || !property) {
