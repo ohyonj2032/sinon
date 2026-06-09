@@ -11,13 +11,40 @@ import samsam from "@sinonjs/samsam";
 import restoreObject from "./sinon/restore-object.js";
 import expectation from "./sinon/mock-expectation.js";
 
+// Cross-module shared default sandbox.
+//
+// When an application mixes `sinon` (CJS) with `sinon/esm` (ESM), each copy
+// of `createApi()` would otherwise construct its own `Sandbox()`. That means
+// `sinon.stub(obj, "m")` from CJS registers a fake in one collection, while
+// `sinon.restore()` from ESM tries to restore from a different collection —
+// and neither call sees the other's fake.
+//
+// We lift the default sandbox onto `globalThis` with a well-known symbol so
+// every copy of Sinon returns the exact same object when `createApi()` is
+// invoked without arguments. Sub-sandboxes created via `sinon.createSandbox()`
+// remain isolated by design, so test files can still own their own lifetime.
+const SINON_DEFAULT_SANDBOX_KEY =
+    typeof Symbol !== "undefined" && Symbol.for
+        ? Symbol.for("sinon.registry.defaultSandbox")
+        : "__sinon_default_sandbox__";
+
+function getSharedDefaultSandbox() {
+    if (typeof globalThis === "undefined") {
+        return new Sandbox();
+    }
+    if (!globalThis[SINON_DEFAULT_SANDBOX_KEY]) {
+        globalThis[SINON_DEFAULT_SANDBOX_KEY] = new Sandbox();
+    }
+    return globalThis[SINON_DEFAULT_SANDBOX_KEY];
+}
+
 /**
  * Creates the Sinon API.
  *
  * @returns {object} The Sinon API object
  */
 export default function createApi() {
-    const sandbox = new Sandbox();
+    const sandbox = getSharedDefaultSandbox();
 
     const apiMethods = {
         // `createSandbox` returns an isolated sandbox: its fakes are tracked

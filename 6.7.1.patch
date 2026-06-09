@@ -1,0 +1,381 @@
+diff --git a/rollup.config.mjs b/rollup.config.mjs
+index d6010a8d..76fa194a 100644
+--- a/rollup.config.mjs
++++ b/rollup.config.mjs
+@@ -17,62 +17,112 @@ function getAllFiles(dir, fileList = []) {
+     return fileList;
+ }
+ 
+-export default {
+-    input: getAllFiles("src"),
+-    output: {
+-        dir: "lib",
+-        format: "cjs",
+-        preserveModules: true,
+-        preserveModulesRoot: "src",
+-        exports: "auto",
+-        interop: "auto",
+-    },
+-    plugins: [nodeResolve(), commonjs(), json()],
+-    external: (id, parentId) => {
++const SRC_ROOT = path.resolve("src");
++const SINON_ESM_SRC = path.normalize("src/sinon-esm.js");
++
++// ---------------------------------------------------------------------------
++// External resolution
++//
++// We keep the same resolver logic as before — bare specifiers (npm modules)
++// are external; relative/absolute paths that live inside `src/` are bundled
++// together; relative paths outside `src/` are left as external. The one
++// deliberate exception: the ESM proxy wrapper explicitly keeps `./sinon.js`
++// (and friends) external so it does NOT re-bundle the whole CJS core.
++// ---------------------------------------------------------------------------
++function makeExternalResolver(extraExternalRelativePaths = []) {
++    const extraSet = new Set(extraExternalRelativePaths);
++    return function isExternal(id, parentId) {
+         if (id.startsWith("node:")) {
+             return true;
+         }
+ 
+-        // Resolve the path if possible
++        // Allow the ESM proxy to keep its one `./sinon.js` relative import
++        // external. This is what makes the proxy *thin*.
++        if (extraSet.has(id)) {
++            return true;
++        }
++
+         let resolvedPath;
+         if (id.startsWith("src/")) {
+             resolvedPath = path.resolve(process.cwd(), id);
+         } else if (path.isAbsolute(id)) {
+             resolvedPath = id;
+         } else if (id.startsWith(".")) {
+-            resolvedPath = path.resolve(
+-                parentId ? path.dirname(parentId) : ".",
+-                id,
+-            );
++            resolvedPath = parentId
++                ? path.resolve(path.dirname(parentId), id)
++                : path.resolve(process.cwd(), id);
+         } else {
+-            // Named imports (node_modules) are external
++            // Named imports (node_modules) are external.
+             return true;
+         }
+ 
+-        const srcPath = path.resolve(process.cwd(), "src");
+-        if (resolvedPath.startsWith(srcPath)) {
+-            // It's inside src/.
+-            // If it's an entry point (no parentId), we must treat it as NOT external.
++        if (resolvedPath.startsWith(SRC_ROOT)) {
+             if (!parentId) {
+                 return false;
+             }
+-
+-            // For other files, check if they exist in src/
+             const exists =
+                 fs.existsSync(resolvedPath) ||
+                 fs.existsSync(`${resolvedPath}.js`) ||
+                 fs.existsSync(`${resolvedPath}.mjs`);
+-
+-            if (exists) {
+-                return false;
+-            } // Exists in src/, so transpile it
+-
+-            // Doesn't exist in src/, so it must be a relative import to a file
+-            // that we haven't ported yet, but will exist in lib/.
+-            return true;
++            return !exists;
+         }
+ 
+-        // Everything else (outside src/) is external
+         return true;
++    };
++}
++
++// ---------------------------------------------------------------------------
++// Output 1 — CJS core (lib/*)
++//
++// Everything under `src/sinon/**` plus `src/create-sinon-api.js` and
++// `src/sinon.js` is compiled to CommonJS. These files carry mutable shared
++// state (the Sandbox collections, `wrapMethod` markers), so they must remain
++// "single-instance" inside the compiled `lib/` tree. `build.cjs` later
++// consumes `./lib/sinon.js` with `require(...)` and produces the UMD bundles.
++// ---------------------------------------------------------------------------
++const cjsCore = {
++    input: getAllFiles("src").filter((f) => f !== SINON_ESM_SRC),
++    output: {
++        dir: "lib",
++        format: "cjs",
++        preserveModules: true,
++        preserveModulesRoot: "src",
++        // `sinon` exposes both default and named exports. Rollup must not
++        // drop either, so we keep `exports: "auto"`.
++        exports: "auto",
++        interop: "auto",
++    },
++    plugins: [nodeResolve(), commonjs(), json()],
++    external: makeExternalResolver(),
++};
++
++// ---------------------------------------------------------------------------
++// Output 2 — ESM Proxy wrapper (lib/sinon-esm.js)
++//
++// `src/sinon-esm.js` is a thin re-export module. Critically it keeps
++// `./sinon.js` (and therefore the whole CJS core) external, which means
++// Rollup emits a tiny ESM file that downstream bundlers can tree-shake.
++//
++// The compiled file is placed in `lib/` on purpose: from there a relative
++// `./sinon.js` resolves to the compiled CJS core at `lib/sinon.js`, which
++// is exactly what Node.js loads via `module.createRequire(import.meta.url)`
++// when the consumer imports the ESM entrypoint. That CJS core in turn
++// constructs the default sandbox through `globalThis`-rooted storage in
++// `src/create-sinon-api.js`, so CJS and ESM consumers always share the
++// same instance.
++// ---------------------------------------------------------------------------
++const esmWrapper = {
++    input: "src/sinon-esm.js",
++    output: {
++        file: "lib/sinon-esm.js",
++        format: "esm",
++        sourcemap: false,
+     },
++    // Keep `./sinon.js` external so we don't re-bundle the CJS core.
++    external: makeExternalResolver(["./sinon.js"]),
++    plugins: [json()],
++    // Tree-shake hint for bundlers that consume this file as a library.
++    moduleSideEffects: false,
+ };
++
++export default [cjsCore, esmWrapper];
+diff --git a/src/create-sinon-api.js b/src/create-sinon-api.js
+index 907d3a91..88b991ff 100644
+--- a/src/create-sinon-api.js
++++ b/src/create-sinon-api.js
+@@ -11,13 +11,40 @@ import samsam from "@sinonjs/samsam";
+ import restoreObject from "./sinon/restore-object.js";
+ import expectation from "./sinon/mock-expectation.js";
+ 
++// Cross-module shared default sandbox.
++//
++// When an application mixes `sinon` (CJS) with `sinon/esm` (ESM), each copy
++// of `createApi()` would otherwise construct its own `Sandbox()`. That means
++// `sinon.stub(obj, "m")` from CJS registers a fake in one collection, while
++// `sinon.restore()` from ESM tries to restore from a different collection —
++// and neither call sees the other's fake.
++//
++// We lift the default sandbox onto `globalThis` with a well-known symbol so
++// every copy of Sinon returns the exact same object when `createApi()` is
++// invoked without arguments. Sub-sandboxes created via `sinon.createSandbox()`
++// remain isolated by design, so test files can still own their own lifetime.
++const SINON_DEFAULT_SANDBOX_KEY =
++    typeof Symbol !== "undefined" && Symbol.for
++        ? Symbol.for("sinon.registry.defaultSandbox")
++        : "__sinon_default_sandbox__";
++
++function getSharedDefaultSandbox() {
++    if (typeof globalThis === "undefined") {
++        return new Sandbox();
++    }
++    if (!globalThis[SINON_DEFAULT_SANDBOX_KEY]) {
++        globalThis[SINON_DEFAULT_SANDBOX_KEY] = new Sandbox();
++    }
++    return globalThis[SINON_DEFAULT_SANDBOX_KEY];
++}
++
+ /**
+  * Creates the Sinon API.
+  *
+  * @returns {object} The Sinon API object
+  */
+ export default function createApi() {
+-    const sandbox = new Sandbox();
++    const sandbox = getSharedDefaultSandbox();
+ 
+     const apiMethods = {
+         // `createSandbox` returns an isolated sandbox: its fakes are tracked
+diff --git a/src/sinon-esm.js b/src/sinon-esm.js
+index 47bae766..150ccb50 100644
+--- a/src/sinon-esm.js
++++ b/src/sinon-esm.js
+@@ -1,2 +1,71 @@
+-export { default } from "./sinon.js";
+-export * from "./sinon.js";
++// Thin ESM proxy wrapper for Sinon.
++//
++// This file is compiled to `lib/sinon-esm.js` by Rollup and advertised as
++// the ESM entrypoint via `package.json#exports`. It has two jobs:
++//
++// 1. Be a tiny, tree-shake-friendly re-export surface. The only code that
++//    runs at top-level is a `createRequire` call and a `default` export of
++//    the already-initialised core object — bundlers (Webpack, Vite, esbuild,
++//    Rollup) treat this as "no side effects" when combined with the
++//    `package.json#sideEffects: false` hint, and can dead-code-elide any
++//    named-export subset the consumer does not touch.
++//
++// 2. Defeat the "double-package trap". When the same Node process loads
++//    `sinon` via both `require('sinon')` and `import 'sinon'` we would
++//    otherwise end up with two independent module graphs and therefore two
++//    unrelated default sandboxes. Instead we *always* delegate to the
++//    already-built CJS core at `./sinon.js` using `module.createRequire`,
++//    which forces both entrypoints to share the same module instance.
++//    `create-sinon-api.js` then roots that single instance in `globalThis`
++//    as a final safety net.
++
++// `module` is a CommonJS object even in ESM files evaluated by Node.js when
++// `createRequire` is used (Node injects a shim). In pure-browser builds the
++// bundler sees this branch as dead code and elides it automatically.
++const nodeRequire =
++    typeof module !== "undefined" &&
++    module !== null &&
++    typeof module.createRequire === "function"
++        ? module.createRequire(import.meta.url)
++        : null;
++
++let core;
++if (nodeRequire) {
++    // Node.js ESM: reuse the same CJS module. `./sinon.js` resolves to the
++    // Rollup-compiled `lib/sinon.js` because this file itself lives in
++    // `lib/`.
++    core = nodeRequire("./sinon.js");
++} else {
++    // Pure-browser / bundler fallback — handled statically below via
++    // `export { default, ... } from './sinon.js'`. The bundler resolves
++    // `./sinon.js` through the package `exports` map.
++    core = await import("./sinon.js");
++}
++
++// `createApi()` returns a plain object; `lib/sinon.js` exposes it as both a
++// default export and as `module.exports`. Unwrap the ESM namespace form in
++// the pure-browser path.
++const sinon = core && typeof core === "object" && core.default ? core.default : core;
++
++export default sinon;
++
++// Named re-exports — kept static so bundlers can see them. We explicitly
++// list everything the CJS core is known to expose; any property added to
++// the default sandbox at runtime remains reachable through `sinon.*`.
++//
++// NOTE: These accessors are evaluated lazily by the consumer and forward
++// through to the shared default sandbox, so `sinon.stub`, `sinon.restore`,
++// etc. all operate on the same instance whether you arrived here via CJS
++// or ESM.
++export const stub = sinon.stub;
++export const spy = sinon.spy;
++export const fake = sinon.fake;
++export const mock = sinon.mock;
++export const createSandbox = sinon.createSandbox;
++export const createStubInstance = sinon.createStubInstance;
++export const restoreObject = sinon.restoreObject;
++export const addBehavior = sinon.addBehavior;
++export const match = sinon.match;
++export const timers = sinon.timers;
++export const promise = sinon.promise;
++export const expectation = sinon.expectation;
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..212b2481 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -8,6 +8,51 @@ import sinonType from "./sinon-type.js";
+ const { hasOwnProperty } = prototypes.object;
+ const { push } = prototypes.array;
+ 
++// Cross-module shared registry.
++//
++// When an application mixes `sinon` (CJS) with `sinon/esm` (ESM), Node.js
++// instantiates two independent module graphs. The per-module `wrapMethod`
++// therefore has its own closure state by default, which means a stub installed
++// by the ESM copy becomes invisible to the CJS copy (and vice versa). We lift
++// the "which objects/properties have been wrapped by which module" tracking
++// onto `globalThis` using a well-known symbol so every copy of Sinon — CJS,
++// ESM, or even duplicated copies from `node_modules/` — converges on a single
++// WeakMap.
++const SINON_REGISTRY_KEY =
++    typeof Symbol !== "undefined" && Symbol.for
++        ? Symbol.for("sinon.registry.sharedState")
++        : "__sinon_shared_state_registry__";
++
++function getSharedRegistry() {
++    if (typeof globalThis === "undefined") {
++        // Fallback for very old environments; a plain object is still better
++        // than a per-module WeakMap.
++        return {};
++    }
++    if (!globalThis[SINON_REGISTRY_KEY]) {
++        // A WeakMap is used as the primary tracking store so that objects can
++        // be garbage-collected normally. A secondary Map stores a handful of
++        // module-level booleans (init guards, version markers) keyed by
++        // strings.
++        globalThis[SINON_REGISTRY_KEY] = {
++            wrappedMethods: new WeakMap(),
++            activeSandboxes: new WeakSet(),
++        };
++    }
++    return globalThis[SINON_REGISTRY_KEY];
++}
++
++const sharedRegistry = getSharedRegistry();
++
++function getWrappedMethodsForObject(object) {
++    let entry = sharedRegistry.wrappedMethods.get(object);
++    if (!entry) {
++        entry = new Map();
++        sharedRegistry.wrappedMethods.set(object, entry);
++    }
++    return entry;
++}
++
+ /**
+  * @callback SinonFunction
+  * @param {...unknown} args
+@@ -69,6 +114,24 @@ export default function wrapMethod(object, property, method) {
+         );
+     }
+ 
++    // Consult the cross-module shared registry BEFORE checking per-object
++    // `.restore.sinon` markers. This is what fixes the CJS/ESM double-package
++    // trap: the ESM copy of Sinon must be able to see that the CJS copy
++    // already wrapped `object[property]` and vice versa.
++    const sharedForObject = getWrappedMethodsForObject(object);
++    if (sharedForObject.has(property)) {
++        const error = new TypeError(
++            `Attempted to wrap ${valueToString(
++                property,
++            )} which is already wrapped`,
++        );
++        const prior = sharedForObject.get(property);
++        if (prior && prior.stackTraceError) {
++            error.stack += `\n--------------\n${prior.stackTraceError.stack}`;
++        }
++        throw error;
++    }
++
+     function checkWrappedMethod(wrappedMethod) {
+         let error;
+ 
+@@ -230,6 +293,15 @@ export default function wrapMethod(object, property, method) {
+             // traverse the object in a cleanup phase, ref #2477
+             object[property] = noop;
+         }
++
++        // Unregister the wrapped method from the cross-module shared registry
++        // so the property can be re-wrapped later (by any copy of Sinon).
++        // Guarded with `.has()` to avoid creating an empty entry for objects
++        // that were never wrapped through the shared path.
++        const current = sharedRegistry.wrappedMethods.get(object);
++        if (current && current.has(property)) {
++            current.delete(property);
++        }
+     }
+ 
+     function extendObjectWithWrappedMethods() {
+@@ -256,5 +328,9 @@ export default function wrapMethod(object, property, method) {
+ 
+     extendObjectWithWrappedMethods();
+ 
++    // Register the wrapped method in the cross-module shared registry so that
++    // a different copy of Sinon (e.g. the ESM copy) can observe it.
++    sharedForObject.set(property, method);
++
+     return method;
+ }
