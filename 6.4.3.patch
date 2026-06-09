@@ -1,0 +1,121 @@
+diff --git a/src/sinon.js b/src/sinon.js
+index 4f2ad9d7..51daf5fb 100644
+--- a/src/sinon.js
++++ b/src/sinon.js
+@@ -1,5 +1,8 @@
+ import createApi from "./create-sinon-api.js";
++import { stubESM } from "./sinon/stub.js";
+ 
+ const sinon = createApi();
+ 
++sinon.stubESM = stubESM;
++
+ export default sinon;
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..786d6d4c 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -11,6 +11,8 @@ import sinonCreateStubInstance from "./create-stub-instance.js";
+ import sinonFake from "./fake.js";
+ import extend from "./util/core/extend.js";
+ 
++import { esmStubsMap, esmNamespaces } from "./stub.js";
++
+ const { array: arrayProto } = commons.prototypes;
+ const { deprecated: logger, valueToString } = commons;
+ const { createMatcher: match } = samsam;
+@@ -306,6 +308,13 @@ export default function Sandbox(opts = {}) {
+         });
+         fakeRestorers.length = 0;
+ 
++        if (esmNamespaces) {
++            forEach(esmNamespaces, function (ns) {
++                esmStubsMap.delete(ns);
++            });
++            esmNamespaces.length = 0;
++        }
++
+         reverse(collection);
+         applyOnEach(collection, "restore");
+         collection = [];
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..dba4c8e7 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -63,6 +63,76 @@ function createStub(originalFunc) {
+     return proxy;
+ }
+ 
++export const esmStubsMap = new WeakMap();
++export const esmNamespaces = [];
++
++export function stubESM(object, property) {
++    if (!isEsModule(object)) {
++        throw new TypeError("ES Modules can only be stubbed using stubESM");
++    }
++
++    if (isNonExistentProperty(object, property)) {
++        throw new TypeError(
++            `Cannot stub non-existent property ${valueToString(property)}`,
++        );
++    }
++
++    const actualDescriptor = getPropertyDescriptor(object, property);
++    assertValidPropertyDescriptor(actualDescriptor, property);
++
++    const func =
++        actualDescriptor && typeof actualDescriptor.value === "function"
++            ? actualDescriptor.value
++            : null;
++    const s = createStub(func);
++
++    extend.nonEnum(s, {
++        rootObj: object,
++        propName: property,
++        shadowsPropOnPrototype: !actualDescriptor || !actualDescriptor.isOwn,
++        restore: function restore() {
++            const stubs = esmStubsMap.get(object);
++            if (stubs) {
++                delete stubs[property];
++            }
++        },
++    });
++
++    let stubs = esmStubsMap.get(object);
++    if (!stubs) {
++        stubs = {};
++        esmStubsMap.set(object, stubs);
++        esmNamespaces.push(object);
++    }
++    stubs[property] = s;
++
++    return new Proxy(object, {
++        get(target, key) {
++            const activeStubs = esmStubsMap.get(target);
++            if (activeStubs && activeStubs[key]) {
++                const activeStub = activeStubs[key];
++                return new Proxy(func || function () {}, {
++                    apply(targetFn, thisArg, args) {
++                        return activeStub.apply(thisArg, args);
++                    },
++                    get(targetFn, propKey) {
++                        const value = activeStub[propKey];
++                        if (typeof value === "function") {
++                            return value.bind(activeStub);
++                        }
++                        return value;
++                    },
++                    set(targetFn, propKey, value) {
++                        activeStub[propKey] = value;
++                        return true;
++                    }
++                });
++            }
++            return Reflect.get(target, key);
++        },
++    });
++}
++
+ export default function stub(object, property) {
+     if (arguments.length > 2) {
+         throw new TypeError(

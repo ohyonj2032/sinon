@@ -11,6 +11,8 @@ import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
 
+import { esmStubsMap, esmNamespaces } from "./stub.js";
+
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
 const { createMatcher: match } = samsam;
@@ -305,6 +307,13 @@ export default function Sandbox(opts = {}) {
             restorer();
         });
         fakeRestorers.length = 0;
+
+        if (esmNamespaces) {
+            forEach(esmNamespaces, function (ns) {
+                esmStubsMap.delete(ns);
+            });
+            esmNamespaces.length = 0;
+        }
 
         reverse(collection);
         applyOnEach(collection, "restore");

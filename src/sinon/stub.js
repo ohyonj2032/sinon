@@ -63,6 +63,76 @@ function createStub(originalFunc) {
     return proxy;
 }
 
+export const esmStubsMap = new WeakMap();
+export const esmNamespaces = [];
+
+export function stubESM(object, property) {
+    if (!isEsModule(object)) {
+        throw new TypeError("ES Modules can only be stubbed using stubESM");
+    }
+
+    if (isNonExistentProperty(object, property)) {
+        throw new TypeError(
+            `Cannot stub non-existent property ${valueToString(property)}`,
+        );
+    }
+
+    const actualDescriptor = getPropertyDescriptor(object, property);
+    assertValidPropertyDescriptor(actualDescriptor, property);
+
+    const func =
+        actualDescriptor && typeof actualDescriptor.value === "function"
+            ? actualDescriptor.value
+            : null;
+    const s = createStub(func);
+
+    extend.nonEnum(s, {
+        rootObj: object,
+        propName: property,
+        shadowsPropOnPrototype: !actualDescriptor || !actualDescriptor.isOwn,
+        restore: function restore() {
+            const stubs = esmStubsMap.get(object);
+            if (stubs) {
+                delete stubs[property];
+            }
+        },
+    });
+
+    let stubs = esmStubsMap.get(object);
+    if (!stubs) {
+        stubs = {};
+        esmStubsMap.set(object, stubs);
+        esmNamespaces.push(object);
+    }
+    stubs[property] = s;
+
+    return new Proxy(object, {
+        get(target, key) {
+            const activeStubs = esmStubsMap.get(target);
+            if (activeStubs && activeStubs[key]) {
+                const activeStub = activeStubs[key];
+                return new Proxy(func || function () {}, {
+                    apply(targetFn, thisArg, args) {
+                        return activeStub.apply(thisArg, args);
+                    },
+                    get(targetFn, propKey) {
+                        const value = activeStub[propKey];
+                        if (typeof value === "function") {
+                            return value.bind(activeStub);
+                        }
+                        return value;
+                    },
+                    set(targetFn, propKey, value) {
+                        activeStub[propKey] = value;
+                        return true;
+                    }
+                });
+            }
+            return Reflect.get(target, key);
+        },
+    });
+}
+
 export default function stub(object, property) {
     if (arguments.length > 2) {
         throw new TypeError(
