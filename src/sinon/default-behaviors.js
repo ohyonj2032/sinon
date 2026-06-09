@@ -151,6 +151,16 @@ const defaultBehaviors = {
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
+        // Detect non-Promise thenable objects so that invoke() can wrap them
+        // in a real Promise. This ensures the `.then` callback fires and
+        // the call is tracked asynchronously, while keeping standard
+        // Promise values untouched to preserve existing behavior.
+        fake.returnValueIsThenable = !!(
+            value !== null &&
+            (typeof value === "object" || typeof value === "function") &&
+            typeof value.then === "function" &&
+            !(value instanceof Promise)
+        );
     },
 
     returnsArg: function returnsArg(fake, index) {
@@ -182,6 +192,7 @@ const defaultBehaviors = {
         fake.resolveThis = false;
         fake.reject = false;
         fake.returnValueDefined = true;
+        fake.returnValueIsThenable = false;
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
@@ -198,6 +209,7 @@ const defaultBehaviors = {
         fake.resolveThis = false;
         fake.reject = false;
         fake.returnValueDefined = false;
+        fake.returnValueIsThenable = false;
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
@@ -219,6 +231,7 @@ const defaultBehaviors = {
         fake.resolveThis = false;
         fake.reject = true;
         fake.returnValueDefined = true;
+        fake.returnValueIsThenable = false;
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
@@ -233,6 +246,7 @@ const defaultBehaviors = {
         fake.resolveThis = true;
         fake.reject = false;
         fake.returnValueDefined = false;
+        fake.returnValueIsThenable = false;
         fake.exception = undefined;
         fake.exceptionCreator = undefined;
         fake.fakeFn = undefined;
@@ -254,6 +268,7 @@ const defaultBehaviors = {
         fake.returnArgAt = undefined;
         fake.returnThis = false;
         fake.returnValue = undefined;
+        fake.returnValueIsThenable = false;
         fake.throwArgAt = undefined;
 
         fake.callArgProp = undefined;

@@ -91,6 +91,18 @@ function ensureArgs(name, behavior, args) {
     }
 }
 
+// Detect thenable objects (Promises or custom thenables) while avoiding
+// false positives for null/primitives. We deliberately keep standard
+// Promises distinguishable from custom thenables so existing Promise-based
+// behavior is preserved.
+function isThenable(value) {
+    return (
+        value !== null &&
+        (typeof value === "object" || typeof value === "function") &&
+        typeof value.then === "function"
+    );
+}
+
 function callCallback(behavior, args) {
     if (typeof behavior.callArgAt === "number") {
         ensureArgs("callsArg", behavior, args);
@@ -188,7 +200,16 @@ const proto = {
         } else if (this.callsThrough) {
             const wrappedMethod = this.effectiveWrappedMethod();
 
-            return wrappedMethod.apply(context, args);
+            // If the wrapped method returns a custom thenable (non-Promise)
+            // wrap it in a real Promise so async semantics (and chained `.then`
+            // callbacks) fire correctly through callThrough.
+            const result = wrappedMethod.apply(context, args);
+
+            if (isThenable(result) && !(result instanceof Promise)) {
+                return (this.promiseLibrary || Promise).resolve(result);
+            }
+
+            return result;
         } else if (this.callsThroughWithNew) {
             // Get the original method (assumed to be a constructor in this case)
             const WrappedClass = this.effectiveWrappedMethod();
@@ -200,6 +221,12 @@ const proto = {
                 concat([null], argsArray),
             );
             return new F();
+        } else if (this.returnValueIsThenable) {
+            // `returns() was called with a custom (non-Promise) thenable value.
+            // Wrap the user's thenable through Promise.resolve so that chained
+            // `.then` callbacks fire through a standard Promise, ensuring
+            // consistent async semantics and proper call-tracking behaviour.
+            return (this.promiseLibrary || Promise).resolve(this.returnValue);
         } else if (typeof this.returnValue !== "undefined") {
             return this.returnValue;
         } else if (typeof this.callArgAt === "number") {

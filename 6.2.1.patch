@@ -1,0 +1,115 @@
+diff --git a/src/sinon/behavior.js b/src/sinon/behavior.js
+index b8cb081c..97019d25 100644
+--- a/src/sinon/behavior.js
++++ b/src/sinon/behavior.js
+@@ -91,6 +91,18 @@ function ensureArgs(name, behavior, args) {
+     }
+ }
+ 
++// Detect thenable objects (Promises or custom thenables) while avoiding
++// false positives for null/primitives. We deliberately keep standard
++// Promises distinguishable from custom thenables so existing Promise-based
++// behavior is preserved.
++function isThenable(value) {
++    return (
++        value !== null &&
++        (typeof value === "object" || typeof value === "function") &&
++        typeof value.then === "function"
++    );
++}
++
+ function callCallback(behavior, args) {
+     if (typeof behavior.callArgAt === "number") {
+         ensureArgs("callsArg", behavior, args);
+@@ -188,7 +200,16 @@ const proto = {
+         } else if (this.callsThrough) {
+             const wrappedMethod = this.effectiveWrappedMethod();
+ 
+-            return wrappedMethod.apply(context, args);
++            // If the wrapped method returns a custom thenable (non-Promise)
++            // wrap it in a real Promise so async semantics (and chained `.then`
++            // callbacks) fire correctly through callThrough.
++            const result = wrappedMethod.apply(context, args);
++
++            if (isThenable(result) && !(result instanceof Promise)) {
++                return (this.promiseLibrary || Promise).resolve(result);
++            }
++
++            return result;
+         } else if (this.callsThroughWithNew) {
+             // Get the original method (assumed to be a constructor in this case)
+             const WrappedClass = this.effectiveWrappedMethod();
+@@ -200,6 +221,12 @@ const proto = {
+                 concat([null], argsArray),
+             );
+             return new F();
++        } else if (this.returnValueIsThenable) {
++            // `returns() was called with a custom (non-Promise) thenable value.
++            // Wrap the user's thenable through Promise.resolve so that chained
++            // `.then` callbacks fire through a standard Promise, ensuring
++            // consistent async semantics and proper call-tracking behaviour.
++            return (this.promiseLibrary || Promise).resolve(this.returnValue);
+         } else if (typeof this.returnValue !== "undefined") {
+             return this.returnValue;
+         } else if (typeof this.callArgAt === "number") {
+diff --git a/src/sinon/default-behaviors.js b/src/sinon/default-behaviors.js
+index df5a00a7..a07334ec 100644
+--- a/src/sinon/default-behaviors.js
++++ b/src/sinon/default-behaviors.js
+@@ -151,6 +151,16 @@ const defaultBehaviors = {
+         fake.exception = undefined;
+         fake.exceptionCreator = undefined;
+         fake.fakeFn = undefined;
++        // Detect non-Promise thenable objects so that invoke() can wrap them
++        // in a real Promise. This ensures the `.then` callback fires and
++        // the call is tracked asynchronously, while keeping standard
++        // Promise values untouched to preserve existing behavior.
++        fake.returnValueIsThenable = !!(
++            value !== null &&
++            (typeof value === "object" || typeof value === "function") &&
++            typeof value.then === "function" &&
++            !(value instanceof Promise)
++        );
+     },
+ 
+     returnsArg: function returnsArg(fake, index) {
+@@ -182,6 +192,7 @@ const defaultBehaviors = {
+         fake.resolveThis = false;
+         fake.reject = false;
+         fake.returnValueDefined = true;
++        fake.returnValueIsThenable = false;
+         fake.exception = undefined;
+         fake.exceptionCreator = undefined;
+         fake.fakeFn = undefined;
+@@ -198,6 +209,7 @@ const defaultBehaviors = {
+         fake.resolveThis = false;
+         fake.reject = false;
+         fake.returnValueDefined = false;
++        fake.returnValueIsThenable = false;
+         fake.exception = undefined;
+         fake.exceptionCreator = undefined;
+         fake.fakeFn = undefined;
+@@ -219,6 +231,7 @@ const defaultBehaviors = {
+         fake.resolveThis = false;
+         fake.reject = true;
+         fake.returnValueDefined = true;
++        fake.returnValueIsThenable = false;
+         fake.exception = undefined;
+         fake.exceptionCreator = undefined;
+         fake.fakeFn = undefined;
+@@ -233,6 +246,7 @@ const defaultBehaviors = {
+         fake.resolveThis = true;
+         fake.reject = false;
+         fake.returnValueDefined = false;
++        fake.returnValueIsThenable = false;
+         fake.exception = undefined;
+         fake.exceptionCreator = undefined;
+         fake.fakeFn = undefined;
+@@ -254,6 +268,7 @@ const defaultBehaviors = {
+         fake.returnArgAt = undefined;
+         fake.returnThis = false;
+         fake.returnValue = undefined;
++        fake.returnValueIsThenable = false;
+         fake.throwArgAt = undefined;
+ 
+         fake.callArgProp = undefined;
