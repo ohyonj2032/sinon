@@ -3,7 +3,6 @@ import behavior from "./behavior.js";
 import behaviors from "./default-behaviors.js";
 import createProxy from "./proxy.js";
 import isNonExistentProperty from "./util/core/is-non-existent-property.js";
-import spy from "./spy.js";
 import extend from "./util/core/extend.js";
 import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
 import isEsModule from "./util/core/is-es-module.js";
@@ -11,6 +10,9 @@ import sinonType from "./util/core/sinon-type.js";
 import wrapMethod from "./util/core/wrap-method.js";
 import throwOnFalsyObject from "./throw-on-falsy-object.js";
 import walkObject from "./util/core/walk-object.js";
+import BehaviorContainer, {
+    mountBehaviorContainerOnto,
+} from "./behavior-container.js";
 
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto, object: objectProto } = commonsPrototypes;
@@ -23,8 +25,13 @@ const sort = arrayProto.sort;
 
 let uuid = 0;
 
+/**
+ * stub 不再"继承" spy。而是：
+ *   - 通过 createProxy 获得与 spy 相同的底层 CallTracker
+ *   - 显式挂载自己的 withArgs / instantiateFake (不依赖 spy 原型)
+ *   - 通过组合 BehaviorContainer 获得行为配置能力
+ */
 function createStub(originalFunc) {
-    // eslint-disable-next-line prefer-const
     let proxy;
 
     function functionStub() {
@@ -43,25 +50,177 @@ function createStub(originalFunc) {
     }
 
     proxy = createProxy(functionStub, originalFunc || functionStub);
-    // Inherit spy API:
-    extend.nonEnum(proxy, spy);
-    // Inherit stub API:
-    extend.nonEnum(proxy, stub);
 
     const name = originalFunc ? functionName(originalFunc) : null;
+
     extend.nonEnum(proxy, {
+        displayName: name || "stub",
         fakes: [],
         instantiateFake: createStub,
-        displayName: name || "stub",
-        defaultBehavior: null,
-        behaviors: [],
         id: `stub#${uuid++}`,
+        // 提供 withArgs/matchingFakes, 无需走 spy 原型
+        withArgs: function () {
+            const args = slice(arguments);
+            const matching = pop(this.matchingFakes(args, true));
+            if (matching) {
+                return matching;
+            }
+            const original = this;
+            const fakeInstance = this.instantiateFake();
+            fakeInstance.matchingArguments = args;
+            fakeInstance.parent = this;
+            push(this.fakes, fakeInstance);
+
+            fakeInstance.withArgs = function () {
+                return original.withArgs.apply(original, arguments);
+            };
+
+            return fakeInstance;
+        },
+        matchingFakes: function (args, strict) {
+            if (!args) return [];
+            return (this.fakes || []).filter(function (fake) {
+                if (!fake.matchingArguments) return false;
+                if (fake.matchingArguments.length > args.length) return false;
+                // 浅比较
+                let eq = true;
+                for (let i = 0; i < fake.matchingArguments.length; i++) {
+                    if (fake.matchingArguments[i] !== args[i]) {
+                        eq = false;
+                        break;
+                    }
+                }
+                if (!eq) return false;
+                return !strict || fake.matchingArguments.length === args.length;
+            });
+        },
     });
+
+    // 组合 BehaviorContainer, 获得 onCall / resetBehavior 等 API
+    const container = BehaviorContainer(proxy);
+    mountBehaviorContainerOnto(proxy, container);
+
+    // 扩展 stub 自定义 API (链式调用)
+    extend.nonEnum(proxy, buildStubApi(proxy, container));
 
     sinonType.set(proxy, "stub");
 
     return proxy;
 }
+
+function push(arr, v) {
+    return arrayProto.push.call(arr, v);
+}
+
+function getParentBehaviour(stubInstance) {
+    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
+}
+
+function getDefaultBehavior(stubInstance) {
+    const bc = stubInstance._behaviorContainer;
+    return (
+        (bc && bc.defaultBehavior) ||
+        getParentBehaviour(stubInstance) ||
+        behavior.create(stubInstance)
+    );
+}
+
+function getCurrentBehavior(stubInstance) {
+    const bc = stubInstance._behaviorContainer;
+    const currentBehavior = bc && bc.behaviors[stubInstance.callCount - 1];
+    return currentBehavior && currentBehavior.isPresent()
+        ? currentBehavior
+        : getDefaultBehavior(stubInstance);
+}
+
+/**
+ * 构造 stub 链式调用 API。该 API 不与 spy 原型耦合, 而是直接操作
+ * BehaviorContainer 和 behavior 对象。
+ */
+function buildStubApi(proxy, container) {
+    const api = {
+        reset: function () {
+            this.resetHistory();
+            this.resetBehavior();
+        },
+
+        withArgs: function withArgs() {
+            // 复用 proxy 上已挂载的 withArgs
+            const fake = proxyWithArgs.apply(this, arguments);
+            if (container.defaultBehavior && container.defaultBehavior.promiseLibrary) {
+                fake._behaviorContainer.defaultBehavior =
+                    fake._behaviorContainer.defaultBehavior ||
+                    behavior.create(fake);
+                fake._behaviorContainer.defaultBehavior.promiseLibrary =
+                    container.defaultBehavior.promiseLibrary;
+            }
+            return fake;
+        },
+    };
+
+    // 挂行为方法 (returns, throws, resolves, rejects, callsFake, callsThrough, yields, yieldsAsync, ...)
+    forEach(Object.keys(behavior), function (method) {
+        if (
+            hasOwnProperty(behavior, method) &&
+            !hasOwnProperty(api, method) &&
+            method !== "create" &&
+            method !== "invoke" &&
+            method !== "isPresent"
+        ) {
+            api[method] = createBehaviorBridge(method);
+        }
+    });
+
+    forEach(Object.keys(behaviors), function (method) {
+        if (hasOwnProperty(behaviors, method) && !hasOwnProperty(api, method)) {
+            api[method] = createBehaviorBridge2(method, behaviors[method]);
+        }
+    });
+
+    return api;
+}
+
+function proxyWithArgs() {
+    const args = slice(arguments);
+    const matching = pop(this.matchingFakes(args, true));
+    if (matching) {
+        return matching;
+    }
+    const original = this;
+    const fakeInstance = this.instantiateFake();
+    fakeInstance.matchingArguments = args;
+    fakeInstance.parent = this;
+    push(this.fakes, fakeInstance);
+    fakeInstance.withArgs = function () {
+        return original.withArgs.apply(original, arguments);
+    };
+    return fakeInstance;
+}
+
+function createBehaviorBridge(methodName) {
+    return function () {
+        const container = this._behaviorContainer;
+        container.defaultBehavior =
+            container.defaultBehavior || behavior.create(this);
+        container.defaultBehavior[methodName].apply(
+            container.defaultBehavior,
+            arguments,
+        );
+        return this;
+    };
+}
+
+function createBehaviorBridge2(methodName, fn) {
+    return function () {
+        const container = this._behaviorContainer;
+        container.defaultBehavior =
+            container.defaultBehavior || behavior.create(this);
+        fn.apply(container.defaultBehavior, slice(arguments));
+        return this;
+    };
+}
+
+/** ================= 顶层 stub(object, property) 入口 ================= */
 
 export default function stub(object, property) {
     if (arguments.length > 2) {
@@ -159,96 +318,3 @@ function isDataDescriptor(descriptor) {
         !descriptor.get
     );
 }
-
-function getParentBehaviour(stubInstance) {
-    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
-}
-
-function getDefaultBehavior(stubInstance) {
-    return (
-        stubInstance.defaultBehavior ||
-        getParentBehaviour(stubInstance) ||
-        behavior.create(stubInstance)
-    );
-}
-
-function getCurrentBehavior(stubInstance) {
-    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
-    return currentBehavior && currentBehavior.isPresent()
-        ? currentBehavior
-        : getDefaultBehavior(stubInstance);
-}
-
-const proto = {
-    resetBehavior: function () {
-        this.defaultBehavior = null;
-        this.behaviors = [];
-
-        delete this.returnValue;
-        delete this.returnArgAt;
-        delete this.throwArgAt;
-        delete this.resolveArgAt;
-        delete this.fakeFn;
-        this.returnThis = false;
-        this.resolveThis = false;
-
-        forEach(this.fakes, function (fake) {
-            fake.resetBehavior();
-        });
-    },
-
-    reset: function () {
-        this.resetHistory();
-        this.resetBehavior();
-    },
-
-    onCall: function onCall(index) {
-        if (!this.behaviors[index]) {
-            this.behaviors[index] = behavior.create(this);
-        }
-
-        return this.behaviors[index];
-    },
-
-    onFirstCall: function onFirstCall() {
-        return this.onCall(0);
-    },
-
-    onSecondCall: function onSecondCall() {
-        return this.onCall(1);
-    },
-
-    onThirdCall: function onThirdCall() {
-        return this.onCall(2);
-    },
-
-    withArgs: function withArgs() {
-        const fake = spy.withArgs.apply(this, arguments);
-        if (this.defaultBehavior && this.defaultBehavior.promiseLibrary) {
-            fake.defaultBehavior =
-                fake.defaultBehavior || behavior.create(fake);
-            fake.defaultBehavior.promiseLibrary =
-                this.defaultBehavior.promiseLibrary;
-        }
-        return fake;
-    },
-};
-
-forEach(Object.keys(behavior), function (method) {
-    if (
-        hasOwnProperty(behavior, method) &&
-        !hasOwnProperty(proto, method) &&
-        method !== "create" &&
-        method !== "invoke"
-    ) {
-        proto[method] = behavior.createBehavior(method);
-    }
-});
-
-forEach(Object.keys(behaviors), function (method) {
-    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(proto, method)) {
-        behavior.addBehavior(stub, method, behaviors[method]);
-    }
-});
-
-extend(stub, proto);

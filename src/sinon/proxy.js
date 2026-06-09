@@ -6,6 +6,7 @@ import * as proxyCallUtil from "./proxy-call-util.js";
 import proxyInvoke from "./proxy-invoke.js";
 import { inspect } from "util";
 import formatters from "./spy-formatters.js";
+import CallTracker, { mountCallTrackerOnto } from "./call-tracker.js";
 
 const { prototypes } = commons;
 const { push, forEach, slice } = prototypes.array;
@@ -54,6 +55,10 @@ const proxyApi = {
             return null;
         }
 
+        if (this._callTracker) {
+            return this._callTracker.getCall(i, this);
+        }
+
         return proxyCall(
             this,
             this.thisValues[i],
@@ -66,6 +71,9 @@ const proxyApi = {
     },
 
     getCalls: function () {
+        if (this._callTracker) {
+            return this._callTracker.getCalls(this);
+        }
         const calls = [];
         let i;
 
@@ -77,6 +85,9 @@ const proxyApi = {
     },
 
     calledBefore: function calledBefore(proxy) {
+        if (this._callTracker) {
+            return this._callTracker.calledBefore(proxy, this);
+        }
         if (!this.called) {
             return false;
         }
@@ -89,6 +100,9 @@ const proxyApi = {
     },
 
     calledAfter: function calledAfter(proxy) {
+        if (this._callTracker) {
+            return this._callTracker.calledAfter(proxy, this);
+        }
         if (!this.called || !proxy.called) {
             return false;
         }
@@ -97,24 +111,30 @@ const proxyApi = {
     },
 
     calledImmediatelyBefore: function calledImmediatelyBefore(proxy) {
+        if (this._callTracker) {
+            return this._callTracker.calledImmediatelyBefore(proxy, this);
+        }
         if (!this.called || !proxy.called) {
             return false;
         }
 
         return (
             this.callIds[this.callCount - 1] ===
-            proxy.callIds[proxy.callCount - 1] - 1
+            proxy.callIds[proxy.callIds.length - 1] - 1
         );
     },
 
     calledImmediatelyAfter: function calledImmediatelyAfter(proxy) {
+        if (this._callTracker) {
+            return this._callTracker.calledImmediatelyAfter(proxy, this);
+        }
         if (!this.called || !proxy.called) {
             return false;
         }
 
         return (
             this.callIds[this.callCount - 1] ===
-            proxy.callIds[proxy.callCount - 1] + 1
+            proxy.callIds[proxy.callIds.length - 1] + 1
         );
     },
 
@@ -147,24 +167,28 @@ const proxyApi = {
             throw err;
         }
 
-        this.called = false;
-        this.notCalled = true;
-        this.calledOnce = false;
-        this.calledTwice = false;
-        this.calledThrice = false;
-        this.callCount = 0;
-        this.firstCall = null;
-        this.secondCall = null;
-        this.thirdCall = null;
-        this.lastCall = null;
-        this.lastArg = null;
-        this.args = [];
-        this.firstArg = null;
-        this.returnValues = [];
-        this.thisValues = [];
-        this.exceptions = [];
-        this.callIds = [];
-        this.errorsWithCallStack = [];
+        if (this._callTracker) {
+            this._callTracker.reset();
+        } else {
+            this.called = false;
+            this.notCalled = true;
+            this.calledOnce = false;
+            this.calledTwice = false;
+            this.calledThrice = false;
+            this.callCount = 0;
+            this.firstCall = null;
+            this.secondCall = null;
+            this.thirdCall = null;
+            this.lastCall = null;
+            this.lastArg = null;
+            this.args = [];
+            this.firstArg = null;
+            this.returnValues = [];
+            this.thisValues = [];
+            this.exceptions = [];
+            this.callIds = [];
+            this.errorsWithCallStack = [];
+        }
 
         if (this.fakes) {
             forEach(this.fakes, function (fake) {
@@ -346,28 +370,8 @@ function wrapFunction(func, originalFunc) {
         // Safari 9 has names that are not configurable.
         Object.defineProperty(p, "name", nameDescriptor);
     }
-    extend.nonEnum(p, {
-        isSinonProxy: true,
-
-        called: false,
-        notCalled: true,
-        calledOnce: false,
-        calledTwice: false,
-        calledThrice: false,
-        callCount: 0,
-        firstCall: null,
-        firstArg: null,
-        secondCall: null,
-        thirdCall: null,
-        lastCall: null,
-        lastArg: null,
-        args: [],
-        returnValues: [],
-        thisValues: [],
-        exceptions: [],
-        callIds: [],
-        errorsWithCallStack: [],
-    });
+    const tracker = CallTracker();
+    mountCallTrackerOnto(p, tracker);
     return p;
 }
 
