@@ -1,8 +1,7 @@
 import commons from "@sinonjs/commons";
-
-const { prototypes } = commons;
 import * as proxyCallUtil from "./proxy-call-util.js";
 
+const { prototypes } = commons;
 const { push, forEach, concat } = prototypes.array;
 const ErrorConstructor = Error.prototype.constructor;
 const { bind } = Function.prototype;
@@ -10,38 +9,22 @@ const { bind } = Function.prototype;
 let callId = 0;
 const maxSafeInteger = Number.MAX_SAFE_INTEGER;
 
-/**
- * @callback SinonFunction
- * @param {...unknown} args
- * @returns {unknown}
- */
-
-/**
- * Invokes a proxy function.
- *
- * @param {SinonFunction} func The original function
- * @param {unknown} thisValue The `this` context for the call
- * @param {Array} args The arguments for the call
- * @returns {unknown} The return value of the function call
- */
 export default function invoke(func, thisValue, args) {
     const matchings = this.matchingFakes(args);
     const currentCallId = callId;
     callId = callId >= maxSafeInteger ? 0 : callId + 1;
     let exception, returnValue;
 
-    proxyCallUtil.incrementCallCount(this);
-    push(this.thisValues, thisValue);
-    push(this.args, args);
-    push(this.callIds, currentCallId);
+    const tracker = this._callTracker;
+    tracker.incrementCallCount();
+    tracker.recordCall(thisValue, args, currentCallId);
+
     forEach(matchings, function (matching) {
-        proxyCallUtil.incrementCallCount(matching);
-        push(matching.thisValues, thisValue);
-        push(matching.args, args);
-        push(matching.callIds, currentCallId);
+        const matchingTracker = matching._callTracker;
+        matchingTracker.incrementCallCount();
+        matchingTracker.recordCall(thisValue, args, currentCallId);
     });
 
-    // Make call properties available from within the spied function:
     proxyCallUtil.createCallProperties(this);
     forEach(matchings, proxyCallUtil.createCallProperties);
 
@@ -51,7 +34,6 @@ export default function invoke(func, thisValue, args) {
         const thisCall = this.getCall(this.callCount - 1);
 
         if (thisCall.calledWithNew()) {
-            // Call through with `new`
             returnValue = new (bind.apply(
                 this.func || func,
                 concat([thisValue], args),
@@ -72,28 +54,21 @@ export default function invoke(func, thisValue, args) {
         delete this.invoking;
     }
 
-    push(this.exceptions, exception);
-    push(this.returnValues, returnValue);
-    forEach(matchings, function (matching) {
-        push(matching.exceptions, exception);
-        push(matching.returnValues, returnValue);
-    });
-
     const err = new ErrorConstructor();
-    // 1. Please do not get stack at this point. It may be so very slow, and not actually used
-    // 2. PhantomJS does not serialize the stack trace until the error has been thrown:
-    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/Stack
     try {
         throw err;
     } catch (e) {
         /* empty */
     }
-    push(this.errorsWithCallStack, err);
+
+    tracker.recordResult(returnValue, exception, err);
     forEach(matchings, function (matching) {
-        push(matching.errorsWithCallStack, err);
+        const matchingTracker = matching._callTracker;
+        push(matchingTracker.exceptions, exception);
+        push(matchingTracker.returnValues, returnValue);
+        push(matchingTracker.errorsWithCallStack, err);
     });
 
-    // Make return value and exception available in the calls:
     proxyCallUtil.createCallProperties(this);
     forEach(matchings, proxyCallUtil.createCallProperties);
 

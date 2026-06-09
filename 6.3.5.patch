@@ -1,0 +1,1223 @@
+diff --git a/src/sinon/behavior.js b/src/sinon/behavior.js
+index b8cb081c..454ccf34 100644
+--- a/src/sinon/behavior.js
++++ b/src/sinon/behavior.js
+@@ -77,8 +77,6 @@ function getCallbackError(behavior, func, args) {
+ }
+ 
+ function ensureArgs(name, behavior, args) {
+-    // map function name to internal property
+-    //   callsArg => callArgAt
+     const property = name.replace(/sArg/, "ArgAt");
+     const index = behavior[property];
+ 
+@@ -118,22 +116,16 @@ function callCallback(behavior, args) {
+     return undefined;
+ }
+ 
+-const proto = {
+-    create: function create(stub) {
+-        const behavior = extend({}, proto);
+-        delete behavior.create;
+-        delete behavior.addBehavior;
+-        delete behavior.createBehavior;
+-        behavior.stub = stub;
++class Behavior {
++    constructor(stub) {
++        this.stub = stub;
+ 
+         if (stub.defaultBehavior && stub.defaultBehavior.promiseLibrary) {
+-            behavior.promiseLibrary = stub.defaultBehavior.promiseLibrary;
++            this.promiseLibrary = stub.defaultBehavior.promiseLibrary;
+         }
++    }
+ 
+-        return behavior;
+-    },
+-
+-    isPresent: function isPresent() {
++    isPresent() {
+         return (
+             typeof this.callArgAt === "number" ||
+             this.exception ||
+@@ -146,16 +138,9 @@ const proto = {
+             this.fakeFn ||
+             this.returnValueDefined
+         );
+-    },
+-
+-    /*eslint complexity: ["error", 20]*/
+-    invoke: function invoke(context, args) {
+-        /*
+-         * callCallback (conditionally) calls ensureArgs
+-         *
+-         * Note: callCallback intentionally happens before
+-         * everything else and cannot be moved lower
+-         */
++    }
++
++    invoke(context, args) {
+         const returnValue = callCallback(this, args);
+ 
+         if (this.exception) {
+@@ -190,11 +175,8 @@ const proto = {
+ 
+             return wrappedMethod.apply(context, args);
+         } else if (this.callsThroughWithNew) {
+-            // Get the original method (assumed to be a constructor in this case)
+             const WrappedClass = this.effectiveWrappedMethod();
+-            // Turn the arguments object into a normal array
+             const argsArray = slice(args);
+-            // Call the constructor
+             const F = WrappedClass.bind.apply(
+                 WrappedClass,
+                 concat([null], argsArray),
+@@ -207,45 +189,49 @@ const proto = {
+         }
+ 
+         return this.returnValue;
+-    },
++    }
+ 
+-    effectiveWrappedMethod: function effectiveWrappedMethod() {
++    effectiveWrappedMethod() {
+         for (let stubb = this.stub; stubb; stubb = stubb.parent) {
+             if (stubb.wrappedMethod) {
+                 return stubb.wrappedMethod;
+             }
+         }
+         throw new Error("Unable to find wrapped method");
+-    },
++    }
+ 
+-    onCall: function onCall(index) {
++    onCall(index) {
+         return this.stub.onCall(index);
+-    },
++    }
+ 
+-    onFirstCall: function onFirstCall() {
++    onFirstCall() {
+         return this.stub.onFirstCall();
+-    },
++    }
+ 
+-    onSecondCall: function onSecondCall() {
++    onSecondCall() {
+         return this.stub.onSecondCall();
+-    },
++    }
+ 
+-    onThirdCall: function onThirdCall() {
++    onThirdCall() {
+         return this.stub.onThirdCall();
+-    },
++    }
+ 
+-    withArgs: function withArgs(/* arguments */) {
++    withArgs() {
+         throw new Error(
+             'Defining a stub by invoking "stub.onCall(...).withArgs(...)" ' +
+                 'is not supported. Use "stub.withArgs(...).onCall(...)" ' +
+                 "to define sequential behavior for calls with certain arguments.",
+         );
+-    },
++    }
++}
++
++Behavior.create = function create(stub) {
++    return new Behavior(stub);
+ };
+ 
+ function createBehavior(behaviorMethod) {
+     return function () {
+-        this.defaultBehavior = this.defaultBehavior || proto.create(this);
++        this.defaultBehavior = this.defaultBehavior || Behavior.create(this);
+         this.defaultBehavior[behaviorMethod].apply(
+             this.defaultBehavior,
+             arguments,
+@@ -255,7 +241,7 @@ function createBehavior(behaviorMethod) {
+ }
+ 
+ function addBehavior(stub, name, fn) {
+-    proto[name] = function () {
++    Behavior.prototype[name] = function () {
+         fn.apply(this, concat([this], slice(arguments)));
+         return this.stub || this;
+     };
+@@ -263,9 +249,13 @@ function addBehavior(stub, name, fn) {
+     stub[name] = createBehavior(name);
+ }
+ 
+-proto.addBehavior = addBehavior;
+-proto.createBehavior = createBehavior;
++Behavior.addBehavior = addBehavior;
++Behavior.createBehavior = createBehavior;
++
++const asyncBehaviors = exportAsyncBehaviors(Behavior.prototype);
+ 
+-const asyncBehaviors = exportAsyncBehaviors(proto);
++Object.keys(asyncBehaviors).forEach(function (key) {
++    Behavior.prototype[key] = asyncBehaviors[key];
++});
+ 
+-export default extend.nonEnum({}, proto, asyncBehaviors);
++export default Behavior;
+diff --git a/src/sinon/proxy-call-util.js b/src/sinon/proxy-call-util.js
+index 3aee91e1..b1802599 100644
+--- a/src/sinon/proxy-call-util.js
++++ b/src/sinon/proxy-call-util.js
+@@ -4,55 +4,32 @@ const { prototypes } = commons;
+ 
+ const { push } = prototypes.array;
+ 
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+-/**
+- * @callback DelegateCallback
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+-/**
+- * Increments the call count of a proxy and updates related properties.
+- *
+- * @param {object} proxy The proxy object
+- */
+ export function incrementCallCount(proxy) {
+-    proxy.called = true;
+-    proxy.callCount += 1;
+-    proxy.notCalled = false;
+-    proxy.calledOnce = proxy.callCount === 1;
+-    proxy.calledTwice = proxy.callCount === 2;
+-    proxy.calledThrice = proxy.callCount === 3;
++    const tracker = proxy._callTracker;
++    if (tracker) {
++        tracker.incrementCallCount();
++    } else {
++        proxy.called = true;
++        proxy.callCount += 1;
++        proxy.notCalled = false;
++        proxy.calledOnce = proxy.callCount === 1;
++        proxy.calledTwice = proxy.callCount === 2;
++        proxy.calledThrice = proxy.callCount === 3;
++    }
+ }
+ 
+-/**
+- * Creates properties on a proxy that point to specific calls (first, second, third, last).
+- *
+- * @param {object} proxy The proxy object
+- */
+ export function createCallProperties(proxy) {
+-    proxy.firstCall = proxy.getCall(0);
+-    proxy.secondCall = proxy.getCall(1);
+-    proxy.thirdCall = proxy.getCall(2);
+-    proxy.lastCall = proxy.getCall(proxy.callCount - 1);
++    const tracker = proxy._callTracker;
++    if (tracker) {
++        tracker.createCallProperties(proxy);
++    } else {
++        proxy.firstCall = proxy.getCall(0);
++        proxy.secondCall = proxy.getCall(1);
++        proxy.thirdCall = proxy.getCall(2);
++        proxy.lastCall = proxy.getCall(proxy.callCount - 1);
++    }
+ }
+ 
+-/**
+- * Delegates a proxy method call to all its individual calls.
+- *
+- * @param {object} proxy The proxy object
+- * @param {string} method The method name
+- * @param {boolean} matchAny Whether to return true if any call matches
+- * @param {string} [actual] The actual method name on the call object
+- * @param {boolean} [returnsValues] Whether to return an array of return values
+- * @param {DelegateCallback} [notCalled] Function to call if the proxy has not been called
+- * @param {number} [totalCallCount] The expected total call count
+- */
+ export function delegateToCalls(
+     proxy,
+     method,
+diff --git a/src/sinon/proxy-invoke.js b/src/sinon/proxy-invoke.js
+index 8a7433ab..3836f941 100644
+--- a/src/sinon/proxy-invoke.js
++++ b/src/sinon/proxy-invoke.js
+@@ -1,8 +1,7 @@
+ import commons from "@sinonjs/commons";
+-
+-const { prototypes } = commons;
+ import * as proxyCallUtil from "./proxy-call-util.js";
+ 
++const { prototypes } = commons;
+ const { push, forEach, concat } = prototypes.array;
+ const ErrorConstructor = Error.prototype.constructor;
+ const { bind } = Function.prototype;
+@@ -10,38 +9,22 @@ const { bind } = Function.prototype;
+ let callId = 0;
+ const maxSafeInteger = Number.MAX_SAFE_INTEGER;
+ 
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+-/**
+- * Invokes a proxy function.
+- *
+- * @param {SinonFunction} func The original function
+- * @param {unknown} thisValue The `this` context for the call
+- * @param {Array} args The arguments for the call
+- * @returns {unknown} The return value of the function call
+- */
+ export default function invoke(func, thisValue, args) {
+     const matchings = this.matchingFakes(args);
+     const currentCallId = callId;
+     callId = callId >= maxSafeInteger ? 0 : callId + 1;
+     let exception, returnValue;
+ 
+-    proxyCallUtil.incrementCallCount(this);
+-    push(this.thisValues, thisValue);
+-    push(this.args, args);
+-    push(this.callIds, currentCallId);
++    const tracker = this._callTracker;
++    tracker.incrementCallCount();
++    tracker.recordCall(thisValue, args, currentCallId);
++
+     forEach(matchings, function (matching) {
+-        proxyCallUtil.incrementCallCount(matching);
+-        push(matching.thisValues, thisValue);
+-        push(matching.args, args);
+-        push(matching.callIds, currentCallId);
++        const matchingTracker = matching._callTracker;
++        matchingTracker.incrementCallCount();
++        matchingTracker.recordCall(thisValue, args, currentCallId);
+     });
+ 
+-    // Make call properties available from within the spied function:
+     proxyCallUtil.createCallProperties(this);
+     forEach(matchings, proxyCallUtil.createCallProperties);
+ 
+@@ -51,7 +34,6 @@ export default function invoke(func, thisValue, args) {
+         const thisCall = this.getCall(this.callCount - 1);
+ 
+         if (thisCall.calledWithNew()) {
+-            // Call through with `new`
+             returnValue = new (bind.apply(
+                 this.func || func,
+                 concat([thisValue], args),
+@@ -72,28 +54,21 @@ export default function invoke(func, thisValue, args) {
+         delete this.invoking;
+     }
+ 
+-    push(this.exceptions, exception);
+-    push(this.returnValues, returnValue);
+-    forEach(matchings, function (matching) {
+-        push(matching.exceptions, exception);
+-        push(matching.returnValues, returnValue);
+-    });
+-
+     const err = new ErrorConstructor();
+-    // 1. Please do not get stack at this point. It may be so very slow, and not actually used
+-    // 2. PhantomJS does not serialize the stack trace until the error has been thrown:
+-    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/Stack
+     try {
+         throw err;
+     } catch (e) {
+         /* empty */
+     }
+-    push(this.errorsWithCallStack, err);
++
++    tracker.recordResult(returnValue, exception, err);
+     forEach(matchings, function (matching) {
+-        push(matching.errorsWithCallStack, err);
++        const matchingTracker = matching._callTracker;
++        push(matchingTracker.exceptions, exception);
++        push(matchingTracker.returnValues, returnValue);
++        push(matchingTracker.errorsWithCallStack, err);
+     });
+ 
+-    // Make return value and exception available in the calls:
+     proxyCallUtil.createCallProperties(this);
+     forEach(matchings, proxyCallUtil.createCallProperties);
+ 
+diff --git a/src/sinon/proxy.js b/src/sinon/proxy.js
+index c61876ec..c0b10fc8 100644
+--- a/src/sinon/proxy.js
++++ b/src/sinon/proxy.js
+@@ -4,21 +4,15 @@ import functionToString from "./util/core/function-to-string.js";
+ import proxyCall from "./proxy-call.js";
+ import * as proxyCallUtil from "./proxy-call-util.js";
+ import proxyInvoke from "./proxy-invoke.js";
++import CallTracker from "./util/core/call-tracker.js";
+ import { inspect } from "util";
+ import formatters from "./spy-formatters.js";
+ 
+ const { prototypes } = commons;
+ const { push, forEach, slice } = prototypes.array;
+ 
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+ const emptyFakes = [];
+ 
+-// Public API
+ const proxyApi = {
+     toString: functionToString,
+ 
+@@ -26,8 +20,6 @@ const proxyApi = {
+         this.displayName = name;
+         const nameDescriptor = Object.getOwnPropertyDescriptor(this, "name");
+         if (nameDescriptor && nameDescriptor.configurable) {
+-            // IE 11 functions don't have a name.
+-            // Safari 9 has names that are not configurable.
+             nameDescriptor.value = name;
+             Object.defineProperty(this, "name", nameDescriptor);
+         }
+@@ -36,44 +28,16 @@ const proxyApi = {
+ 
+     invoke: proxyInvoke,
+ 
+-    /*
+-     * Hook for derived implementation to return fake instances matching the
+-     * given arguments.
+-     */
+-    matchingFakes: function (/*args, strict*/) {
++    matchingFakes: function () {
+         return emptyFakes;
+     },
+ 
+     getCall: function getCall(index) {
+-        let i = index;
+-        if (i < 0) {
+-            // Negative indices means counting backwards from the last call
+-            i += this.callCount;
+-        }
+-        if (i < 0 || i >= this.callCount) {
+-            return null;
+-        }
+-
+-        return proxyCall(
+-            this,
+-            this.thisValues[i],
+-            this.args[i],
+-            this.returnValues[i],
+-            this.exceptions[i],
+-            this.callIds[i],
+-            this.errorsWithCallStack[i],
+-        );
++        return this._callTracker.getCall(index, this);
+     },
+ 
+     getCalls: function () {
+-        const calls = [];
+-        let i;
+-
+-        for (i = 0; i < this.callCount; i++) {
+-            push(calls, this.getCall(i));
+-        }
+-
+-        return calls;
++        return this._callTracker.getCalls(this);
+     },
+ 
+     calledBefore: function calledBefore(proxy) {
+@@ -147,24 +111,7 @@ const proxyApi = {
+             throw err;
+         }
+ 
+-        this.called = false;
+-        this.notCalled = true;
+-        this.calledOnce = false;
+-        this.calledTwice = false;
+-        this.calledThrice = false;
+-        this.callCount = 0;
+-        this.firstCall = null;
+-        this.secondCall = null;
+-        this.thirdCall = null;
+-        this.lastCall = null;
+-        this.lastArg = null;
+-        this.args = [];
+-        this.firstArg = null;
+-        this.returnValues = [];
+-        this.thisValues = [];
+-        this.exceptions = [];
+-        this.callIds = [];
+-        this.errorsWithCallStack = [];
++        this._callTracker.reset();
+ 
+         if (this.fakes) {
+             forEach(this.fakes, function (fake) {
+@@ -247,10 +194,7 @@ delegateToCalls(proxyApi, "alwaysCalledWithNew", false, "calledWithNew");
+ function wrapFunction(func, originalFunc) {
+     const arity = originalFunc.length;
+     let p;
+-    // Do not change this to use an eval. Projects that depend on sinon block the use of eval.
+-    // ref: https://github.com/sinonjs/sinon/issues/710
+     switch (arity) {
+-        /*eslint-disable no-unused-vars*/
+         case 0:
+             p = function proxy() {
+                 "use strict";
+@@ -335,53 +279,28 @@ function wrapFunction(func, originalFunc) {
+                 return p.invoke(func, this, slice(arguments));
+             };
+             break;
+-        /*eslint-enable*/
+     }
+     const nameDescriptor = Object.getOwnPropertyDescriptor(
+         originalFunc,
+         "name",
+     );
+     if (nameDescriptor && nameDescriptor.configurable) {
+-        // IE 11 functions don't have a name.
+-        // Safari 9 has names that are not configurable.
+         Object.defineProperty(p, "name", nameDescriptor);
+     }
++
++    const callTracker = new CallTracker();
++    CallTracker.installDelegates(p, callTracker);
++
+     extend.nonEnum(p, {
+         isSinonProxy: true,
+-
+-        called: false,
+-        notCalled: true,
+-        calledOnce: false,
+-        calledTwice: false,
+-        calledThrice: false,
+-        callCount: 0,
+-        firstCall: null,
+-        firstArg: null,
+-        secondCall: null,
+-        thirdCall: null,
+-        lastCall: null,
+-        lastArg: null,
+-        args: [],
+-        returnValues: [],
+-        thisValues: [],
+-        exceptions: [],
+-        callIds: [],
+-        errorsWithCallStack: [],
+     });
++
+     return p;
+ }
+ 
+-/**
+- * Creates a proxy function.
+- *
+- * @param {SinonFunction} func The original function
+- * @param {SinonFunction} originalFunc The original function (for arity and name)
+- * @returns {SinonFunction} The proxy function
+- */
+ export default function createProxy(func, originalFunc) {
+     const proxy = wrapFunction(func, originalFunc);
+ 
+-    // Inherit function properties:
+     extend(proxy, func);
+ 
+     proxy.prototype = func.prototype;
+diff --git a/src/sinon/spy.js b/src/sinon/spy.js
+index 9c57ff50..069f779b 100644
+--- a/src/sinon/spy.js
++++ b/src/sinon/spy.js
+@@ -13,12 +13,6 @@ const { deepEqual } = samsam;
+ const { forEach, pop, push, slice } = prototypes.array;
+ const filter = Array.prototype.filter;
+ 
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+ let uuid = 0;
+ 
+ function matches(fake, args, strict) {
+@@ -32,7 +26,6 @@ function matches(fake, args, strict) {
+     return false;
+ }
+ 
+-// Public API
+ const spyApi = {
+     withArgs: function () {
+         const args = slice(arguments);
+@@ -69,7 +62,6 @@ const spyApi = {
+         return fakeInstance;
+     },
+ 
+-    // Override proxy default implementation
+     matchingFakes: function (args, strict) {
+         return filter.call(this.fakes, function (fakeInstance) {
+             return matches(fakeInstance, args, strict);
+@@ -100,7 +92,6 @@ delegateToCalls(spyApi, "yield", false, "yield", true, function () {
+         `${this.toString()} cannot yield since it was not yet invoked.`,
+     );
+ });
+-// "invokeCallback" is an alias for "yield" since "yield" is invalid in strict mode.
+ spyApi.invokeCallback = spyApi.yield;
+ delegateToCalls(spyApi, "yieldOn", false, "yieldOn", true, function () {
+     throw new Error(
+@@ -143,7 +134,6 @@ function createSpy(func) {
+ 
+     const proxy = createProxy(funk, funk);
+ 
+-    // Inherit spy API:
+     extend.nonEnum(proxy, spyApi);
+     extend.nonEnum(proxy, {
+         displayName: name || "spy",
+@@ -154,14 +144,6 @@ function createSpy(func) {
+     return proxy;
+ }
+ 
+-/**
+- * Creates a spy.
+- *
+- * @param {object|SinonFunction} [object] The object or function to spy on
+- * @param {string} [property] The property name to spy on
+- * @param {Array} [types] Types of accessor to spy on (get, set)
+- * @returns {SinonFunction|object} The spy or an object with spied accessors
+- */
+ export default function spy(object, property, types) {
+     if (isEsModule(object)) {
+         throw new TypeError("ES Modules cannot be spied");
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..fcec1591 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -1,9 +1,9 @@
+ import commons from "@sinonjs/commons";
+-import behavior from "./behavior.js";
++import samsam from "@sinonjs/samsam";
++import Behavior from "./behavior.js";
+ import behaviors from "./default-behaviors.js";
+ import createProxy from "./proxy.js";
+ import isNonExistentProperty from "./util/core/is-non-existent-property.js";
+-import spy from "./spy.js";
+ import extend from "./util/core/extend.js";
+ import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
+ import isEsModule from "./util/core/is-es-module.js";
+@@ -11,20 +11,34 @@ import sinonType from "./util/core/sinon-type.js";
+ import wrapMethod from "./util/core/wrap-method.js";
+ import throwOnFalsyObject from "./throw-on-falsy-object.js";
+ import walkObject from "./util/core/walk-object.js";
++import * as proxyCallUtil from "./proxy-call-util.js";
+ 
+ const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
+ const { array: arrayProto, object: objectProto } = commonsPrototypes;
+ const { hasOwnProperty } = objectProto;
++const { deepEqual } = samsam;
+ 
+ const forEach = arrayProto.forEach;
+ const pop = arrayProto.pop;
++const push = arrayProto.push;
+ const slice = arrayProto.slice;
+ const sort = arrayProto.sort;
++const filter = Array.prototype.filter;
+ 
+ let uuid = 0;
+ 
++function matches(fake, args, strict) {
++    const margs = fake.matchingArguments;
++    if (
++        margs.length <= args.length &&
++        deepEqual(slice(args, 0, margs.length), margs)
++    ) {
++        return !strict || margs.length === args.length;
++    }
++    return false;
++}
++
+ function createStub(originalFunc) {
+-    // eslint-disable-next-line prefer-const
+     let proxy;
+ 
+     function functionStub() {
+@@ -43,10 +57,9 @@ function createStub(originalFunc) {
+     }
+ 
+     proxy = createProxy(functionStub, originalFunc || functionStub);
+-    // Inherit spy API:
+-    extend.nonEnum(proxy, spy);
+-    // Inherit stub API:
+-    extend.nonEnum(proxy, stub);
++
++    extend.nonEnum(proxy, stubApi);
++    extend.nonEnum(proxy, stubProto);
+ 
+     const name = originalFunc ? functionName(originalFunc) : null;
+     extend.nonEnum(proxy, {
+@@ -63,6 +76,188 @@ function createStub(originalFunc) {
+     return proxy;
+ }
+ 
++const stubApi = {
++    withArgs: function () {
++        const args = slice(arguments);
++        const matching = pop(this.matchingFakes(args, true));
++        if (matching) {
++            return matching;
++        }
++
++        const original = this;
++        const fakeInstance = this.instantiateFake();
++        fakeInstance.matchingArguments = args;
++        fakeInstance.parent = this;
++        push(this.fakes, fakeInstance);
++
++        fakeInstance.withArgs = function () {
++            return original.withArgs.apply(original, arguments);
++        };
++
++        forEach(original.args, function (arg, i) {
++            if (!matches(fakeInstance, arg)) {
++                return;
++            }
++
++            proxyCallUtil.incrementCallCount(fakeInstance);
++            push(fakeInstance.thisValues, original.thisValues[i]);
++            push(fakeInstance.args, arg);
++            push(fakeInstance.returnValues, original.returnValues[i]);
++            push(fakeInstance.exceptions, original.exceptions[i]);
++            push(fakeInstance.callIds, original.callIds[i]);
++        });
++
++        proxyCallUtil.createCallProperties(fakeInstance);
++
++        if (this.defaultBehavior && this.defaultBehavior.promiseLibrary) {
++            fakeInstance.defaultBehavior =
++                fakeInstance.defaultBehavior || Behavior.create(fakeInstance);
++            fakeInstance.defaultBehavior.promiseLibrary =
++                this.defaultBehavior.promiseLibrary;
++        }
++
++        return fakeInstance;
++    },
++
++    matchingFakes: function (args, strict) {
++        return filter.call(this.fakes, function (fakeInstance) {
++            return matches(fakeInstance, args, strict);
++        });
++    },
++};
++
++const delegateToCalls = proxyCallUtil.delegateToCalls;
++delegateToCalls(stubApi, "callArg", false, "callArgWith", true, function () {
++    throw new Error(
++        `${this.toString()} cannot call arg since it was not yet invoked.`,
++    );
++});
++stubApi.callArgWith = stubApi.callArg;
++delegateToCalls(stubApi, "callArgOn", false, "callArgOnWith", true, function () {
++    throw new Error(
++        `${this.toString()} cannot call arg since it was not yet invoked.`,
++    );
++});
++stubApi.callArgOnWith = stubApi.callArgOn;
++delegateToCalls(stubApi, "throwArg", false, "throwArg", false, function () {
++    throw new Error(
++        `${this.toString()} cannot throw arg since it was not yet invoked.`,
++    );
++});
++delegateToCalls(stubApi, "yield", false, "yield", true, function () {
++    throw new Error(
++        `${this.toString()} cannot yield since it was not yet invoked.`,
++    );
++});
++stubApi.invokeCallback = stubApi.yield;
++delegateToCalls(stubApi, "yieldOn", false, "yieldOn", true, function () {
++    throw new Error(
++        `${this.toString()} cannot yield since it was not yet invoked.`,
++    );
++});
++delegateToCalls(stubApi, "yieldTo", false, "yieldTo", true, function (property) {
++    throw new Error(
++        `${this.toString()} cannot yield to '${valueToString(
++            property,
++        )}' since it was not yet invoked.`,
++    );
++});
++delegateToCalls(
++    stubApi,
++    "yieldToOn",
++    false,
++    "yieldToOn",
++    true,
++    function (property) {
++        throw new Error(
++            `${this.toString()} cannot yield to '${valueToString(
++                property,
++            )}' since it was not yet invoked.`,
++        );
++    },
++);
++
++const stubProto = {
++    resetBehavior: function () {
++        this.defaultBehavior = null;
++        this.behaviors = [];
++
++        delete this.returnValue;
++        delete this.returnArgAt;
++        delete this.throwArgAt;
++        delete this.resolveArgAt;
++        delete this.fakeFn;
++        this.returnThis = false;
++        this.resolveThis = false;
++
++        forEach(this.fakes, function (fake) {
++            fake.resetBehavior();
++        });
++    },
++
++    reset: function () {
++        this.resetHistory();
++        this.resetBehavior();
++    },
++
++    onCall: function onCall(index) {
++        if (!this.behaviors[index]) {
++            this.behaviors[index] = Behavior.create(this);
++        }
++
++        return this.behaviors[index];
++    },
++
++    onFirstCall: function onFirstCall() {
++        return this.onCall(0);
++    },
++
++    onSecondCall: function onSecondCall() {
++        return this.onCall(1);
++    },
++
++    onThirdCall: function onThirdCall() {
++        return this.onCall(2);
++    },
++};
++
++forEach(Object.keys(Behavior.prototype), function (method) {
++    if (
++        hasOwnProperty(Behavior.prototype, method) &&
++        !hasOwnProperty(stubProto, method) &&
++        method !== "create" &&
++        method !== "invoke" &&
++        method !== "constructor"
++    ) {
++        stubProto[method] = Behavior.createBehavior(method);
++    }
++});
++
++forEach(Object.keys(behaviors), function (method) {
++    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(stubProto, method)) {
++        Behavior.addBehavior(stub, method, behaviors[method]);
++    }
++});
++
++function getParentBehaviour(stubInstance) {
++    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
++}
++
++function getDefaultBehavior(stubInstance) {
++    return (
++        stubInstance.defaultBehavior ||
++        getParentBehaviour(stubInstance) ||
++        Behavior.create(stubInstance)
++    );
++}
++
++function getCurrentBehavior(stubInstance) {
++    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
++    return currentBehavior && currentBehavior.isPresent()
++        ? currentBehavior
++        : getDefaultBehavior(stubInstance);
++}
++
+ export default function stub(object, property) {
+     if (arguments.length > 2) {
+         throw new TypeError(
+@@ -160,95 +355,5 @@ function isDataDescriptor(descriptor) {
+     );
+ }
+ 
+-function getParentBehaviour(stubInstance) {
+-    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
+-}
+-
+-function getDefaultBehavior(stubInstance) {
+-    return (
+-        stubInstance.defaultBehavior ||
+-        getParentBehaviour(stubInstance) ||
+-        behavior.create(stubInstance)
+-    );
+-}
+-
+-function getCurrentBehavior(stubInstance) {
+-    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
+-    return currentBehavior && currentBehavior.isPresent()
+-        ? currentBehavior
+-        : getDefaultBehavior(stubInstance);
+-}
+-
+-const proto = {
+-    resetBehavior: function () {
+-        this.defaultBehavior = null;
+-        this.behaviors = [];
+-
+-        delete this.returnValue;
+-        delete this.returnArgAt;
+-        delete this.throwArgAt;
+-        delete this.resolveArgAt;
+-        delete this.fakeFn;
+-        this.returnThis = false;
+-        this.resolveThis = false;
+-
+-        forEach(this.fakes, function (fake) {
+-            fake.resetBehavior();
+-        });
+-    },
+-
+-    reset: function () {
+-        this.resetHistory();
+-        this.resetBehavior();
+-    },
+-
+-    onCall: function onCall(index) {
+-        if (!this.behaviors[index]) {
+-            this.behaviors[index] = behavior.create(this);
+-        }
+-
+-        return this.behaviors[index];
+-    },
+-
+-    onFirstCall: function onFirstCall() {
+-        return this.onCall(0);
+-    },
+-
+-    onSecondCall: function onSecondCall() {
+-        return this.onCall(1);
+-    },
+-
+-    onThirdCall: function onThirdCall() {
+-        return this.onCall(2);
+-    },
+-
+-    withArgs: function withArgs() {
+-        const fake = spy.withArgs.apply(this, arguments);
+-        if (this.defaultBehavior && this.defaultBehavior.promiseLibrary) {
+-            fake.defaultBehavior =
+-                fake.defaultBehavior || behavior.create(fake);
+-            fake.defaultBehavior.promiseLibrary =
+-                this.defaultBehavior.promiseLibrary;
+-        }
+-        return fake;
+-    },
+-};
+-
+-forEach(Object.keys(behavior), function (method) {
+-    if (
+-        hasOwnProperty(behavior, method) &&
+-        !hasOwnProperty(proto, method) &&
+-        method !== "create" &&
+-        method !== "invoke"
+-    ) {
+-        proto[method] = behavior.createBehavior(method);
+-    }
+-});
+-
+-forEach(Object.keys(behaviors), function (method) {
+-    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(proto, method)) {
+-        behavior.addBehavior(stub, method, behaviors[method]);
+-    }
+-});
+-
+-extend(stub, proto);
++extend(stub, stubApi);
++extend(stub, stubProto);
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..0df874ce 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -4,26 +4,15 @@ const { prototypes, valueToString } = commons;
+ import getPropertyDescriptor from "./get-property-descriptor.js";
+ import extend from "./extend.js";
+ import sinonType from "./sinon-type.js";
++import {
++    createDescriptorStrategy,
++} from "./descriptor-strategy.js";
+ 
+ const { hasOwnProperty } = prototypes.object;
+ const { push } = prototypes.array;
+ 
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+-// eslint-disable-next-line no-empty-function
+ const noop = () => {};
+ 
+-function isFunction(obj) {
+-    return (
+-        typeof obj === "function" ||
+-        Boolean(obj && obj.constructor && obj.call && obj.apply)
+-    );
+-}
+-
+ function mirrorProperties(target, source) {
+     for (const prop in source) {
+         if (!hasOwnProperty(target, prop)) {
+@@ -47,17 +36,6 @@ function getAccessor(object, property, method) {
+     return null;
+ }
+ 
+-// Cheap way to detect if we have ES5 support.
+-const hasES5Support = "keys" in Object;
+-
+-/**
+- * Wraps a method on an object with another function.
+- *
+- * @param {object} object The object containing the method
+- * @param {string | symbol} property The property name of the method to wrap
+- * @param {SinonFunction|object} method The wrapper function or a property descriptor
+- * @returns {SinonFunction} The wrapped method
+- */
+ export default function wrapMethod(object, property, method) {
+     if (!object) {
+         throw new TypeError("Should wrap property of object");
+@@ -69,192 +47,61 @@ export default function wrapMethod(object, property, method) {
+         );
+     }
+ 
+-    function checkWrappedMethod(wrappedMethod) {
+-        let error;
+-
+-        if (!isFunction(wrappedMethod)) {
+-            error = new TypeError(
+-                `Attempted to wrap ${typeof wrappedMethod} property ${valueToString(
+-                    property,
+-                )} as function`,
+-            );
+-        } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
+-            error = new TypeError(
+-                `Attempted to wrap ${valueToString(
+-                    property,
+-                )} which is already wrapped`,
+-            );
+-        } else if (wrappedMethod.calledBefore) {
+-            const verb = wrappedMethod.returns ? "stubbed" : "spied on";
+-            error = new TypeError(
+-                `Attempted to wrap ${valueToString(
+-                    property,
+-                )} which is already ${verb}`,
+-            );
+-        }
+-
+-        if (error) {
+-            if (wrappedMethod && wrappedMethod.stackTraceError) {
+-                error.stack += `\n--------------\n${wrappedMethod.stackTraceError.stack}`;
+-            }
+-            throw error;
+-        }
+-    }
+-
+-    let error, wrappedMethod, i, wrappedMethodDesc, target, accessor;
+-
+-    const wrappedMethods = [];
+-
+-    function simplePropertyAssignment() {
+-        wrappedMethod = object[property];
+-        checkWrappedMethod(wrappedMethod);
+-        object[property] = method;
+-        method.displayName = property;
+-    }
+-
+-    // Firefox has a problem when using hasOwn.call on objects from other frames.
+     const owned = object.hasOwnProperty
+         ? object.hasOwnProperty(property)
+         : hasOwnProperty(object, property);
+ 
+-    if (hasES5Support) {
+-        const methodDesc =
+-            typeof method === "function" ? { value: method } : method;
+-        wrappedMethodDesc = getPropertyDescriptor(object, property);
+-
+-        if (!wrappedMethodDesc) {
+-            error = new TypeError(
+-                `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
+-            );
+-        } else if (
+-            wrappedMethodDesc.restore &&
+-            wrappedMethodDesc.restore.sinon
+-        ) {
+-            error = new TypeError(
+-                `Attempted to wrap ${property} which is already wrapped`,
+-            );
+-        }
+-        if (error) {
+-            if (wrappedMethodDesc && wrappedMethodDesc.stackTraceError) {
+-                error.stack += `\n--------------\n${wrappedMethodDesc.stackTraceError.stack}`;
+-            }
+-            throw error;
+-        }
+-
+-        const types = Object.keys(methodDesc);
+-        for (i = 0; i < types.length; i++) {
+-            wrappedMethod = wrappedMethodDesc[types[i]];
+-            checkWrappedMethod(wrappedMethod);
+-            push(wrappedMethods, wrappedMethod);
+-        }
++    const strategy = createDescriptorStrategy(object, property, method);
+ 
+-        mirrorProperties(methodDesc, wrappedMethodDesc);
+-        for (i = 0; i < types.length; i++) {
+-            mirrorProperties(methodDesc[types[i]], wrappedMethodDesc[types[i]]);
++    const wrappedMethodDesc = getPropertyDescriptor(object, property);
++    const wrappedMethods = [];
++    const isAccessor =
++        typeof method === "object" &&
++        (typeof method.get === "function" || typeof method.set === "function");
++
++    if (isAccessor) {
++        const types = Object.keys(method);
++        for (let i = 0; i < types.length; i++) {
++            push(wrappedMethods, wrappedMethodDesc[types[i]]);
+         }
+-
+-        // you are not allowed to flip the configurable prop on an
+-        // existing descriptor to anything but false (#2514)
+-        if (!owned) {
+-            methodDesc.configurable = true;
++        mirrorProperties(method, wrappedMethodDesc);
++        for (let i = 0; i < types.length; i++) {
++            mirrorProperties(method[types[i]], wrappedMethodDesc[types[i]]);
+         }
++    } else {
++        push(wrappedMethods, wrappedMethodDesc.value);
++    }
+ 
+-        Object.defineProperty(object, property, methodDesc);
++    strategy.apply();
+ 
+-        // catch failing assignment
+-        // this is the converse of the check in `.restore` below
+-        if (typeof method === "function" && object[property] !== method) {
+-            // correct any wrongdoings caused by the defineProperty call above,
+-            // such as adding new items (if object was a Storage object)
+-            delete object[property];
+-            simplePropertyAssignment();
+-        }
+-    } else {
+-        simplePropertyAssignment();
++    if (typeof method === "function" && object[property] !== method) {
++        delete object[property];
++        object[property] = method;
+     }
+ 
+     function restore() {
+-        accessor = getAccessor(object, property, this.wrappedMethod);
+-        let descriptor;
+-        // For prototype properties try to reset by delete first.
+-        // If this fails (ex: localStorage on mobile safari) then force a reset
+-        // via direct assignment.
+-        if (accessor) {
+-            if (!owned) {
+-                try {
+-                    // In some cases `delete` may throw an error
+-                    delete object[property][accessor];
+-                } catch (e) {} // eslint-disable-line no-empty
+-                // For native code functions `delete` fails without throwing an error
+-                // on Chrome < 43, PhantomJS, etc.
+-            } else if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                descriptor[accessor] = wrappedMethodDesc[accessor];
+-                Object.defineProperty(object, property, descriptor);
+-            }
+-
+-            if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                if (descriptor && descriptor.value === target) {
+-                    object[property][accessor] = this.wrappedMethod;
+-                }
+-            } else {
+-                // Use strict equality comparison to check failures then force a reset
+-                // via direct assignment.
+-                if (object[property][accessor] === target) {
+-                    object[property][accessor] = this.wrappedMethod;
+-                }
+-            }
+-        } else {
+-            if (!owned) {
+-                try {
+-                    delete object[property];
+-                } catch (e) {} // eslint-disable-line no-empty
+-            } else if (hasES5Support) {
+-                Object.defineProperty(object, property, wrappedMethodDesc);
+-            }
++        strategy.restore();
+ 
+-            if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                if (descriptor && descriptor.value === target) {
+-                    object[property] = this.wrappedMethod;
+-                }
+-            } else {
+-                if (object[property] === target) {
+-                    object[property] = this.wrappedMethod;
+-                }
+-            }
+-        }
+         if (sinonType.get(object) === "stub-instance") {
+-            // this is simply to avoid errors after restoring if something should
+-            // traverse the object in a cleanup phase, ref #2477
+             object[property] = noop;
+         }
+     }
+ 
+-    function extendObjectWithWrappedMethods() {
+-        for (i = 0; i < wrappedMethods.length; i++) {
+-            accessor = getAccessor(object, property, wrappedMethods[i]);
+-            target = accessor ? method[accessor] : method;
+-            extend.nonEnum(target, {
+-                displayName: property,
+-                wrappedMethod: wrappedMethods[i],
++    for (let i = 0; i < wrappedMethods.length; i++) {
++        const accessor = getAccessor(object, property, wrappedMethods[i]);
++        const target = accessor ? method[accessor] : method;
+ 
+-                // Set up an Error object for a stack trace which can be used later to find what line of
+-                // code the original method was created on.
+-                stackTraceError: new Error("Stack Trace for original"),
++        extend.nonEnum(target, {
++            displayName: property,
++            wrappedMethod: wrappedMethods[i],
+ 
+-                restore: restore,
+-            });
++            stackTraceError: new Error("Stack Trace for original"),
+ 
+-            target.restore.sinon = true;
+-            if (!hasES5Support) {
+-                mirrorProperties(target, wrappedMethod);
+-            }
+-        }
+-    }
++            restore: restore,
++        });
+ 
+-    extendObjectWithWrappedMethods();
++        target.restore.sinon = true;
++    }
+ 
+     return method;
+ }

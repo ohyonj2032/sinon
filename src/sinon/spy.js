@@ -13,12 +13,6 @@ const { deepEqual } = samsam;
 const { forEach, pop, push, slice } = prototypes.array;
 const filter = Array.prototype.filter;
 
-/**
- * @callback SinonFunction
- * @param {...unknown} args
- * @returns {unknown}
- */
-
 let uuid = 0;
 
 function matches(fake, args, strict) {
@@ -32,7 +26,6 @@ function matches(fake, args, strict) {
     return false;
 }
 
-// Public API
 const spyApi = {
     withArgs: function () {
         const args = slice(arguments);
@@ -69,7 +62,6 @@ const spyApi = {
         return fakeInstance;
     },
 
-    // Override proxy default implementation
     matchingFakes: function (args, strict) {
         return filter.call(this.fakes, function (fakeInstance) {
             return matches(fakeInstance, args, strict);
@@ -100,7 +92,6 @@ delegateToCalls(spyApi, "yield", false, "yield", true, function () {
         `${this.toString()} cannot yield since it was not yet invoked.`,
     );
 });
-// "invokeCallback" is an alias for "yield" since "yield" is invalid in strict mode.
 spyApi.invokeCallback = spyApi.yield;
 delegateToCalls(spyApi, "yieldOn", false, "yieldOn", true, function () {
     throw new Error(
@@ -143,7 +134,6 @@ function createSpy(func) {
 
     const proxy = createProxy(funk, funk);
 
-    // Inherit spy API:
     extend.nonEnum(proxy, spyApi);
     extend.nonEnum(proxy, {
         displayName: name || "spy",
@@ -154,14 +144,6 @@ function createSpy(func) {
     return proxy;
 }
 
-/**
- * Creates a spy.
- *
- * @param {object|SinonFunction} [object] The object or function to spy on
- * @param {string} [property] The property name to spy on
- * @param {Array} [types] Types of accessor to spy on (get, set)
- * @returns {SinonFunction|object} The spy or an object with spied accessors
- */
 export default function spy(object, property, types) {
     if (isEsModule(object)) {
         throw new TypeError("ES Modules cannot be spied");

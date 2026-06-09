@@ -77,8 +77,6 @@ function getCallbackError(behavior, func, args) {
 }
 
 function ensureArgs(name, behavior, args) {
-    // map function name to internal property
-    //   callsArg => callArgAt
     const property = name.replace(/sArg/, "ArgAt");
     const index = behavior[property];
 
@@ -118,22 +116,16 @@ function callCallback(behavior, args) {
     return undefined;
 }
 
-const proto = {
-    create: function create(stub) {
-        const behavior = extend({}, proto);
-        delete behavior.create;
-        delete behavior.addBehavior;
-        delete behavior.createBehavior;
-        behavior.stub = stub;
+class Behavior {
+    constructor(stub) {
+        this.stub = stub;
 
         if (stub.defaultBehavior && stub.defaultBehavior.promiseLibrary) {
-            behavior.promiseLibrary = stub.defaultBehavior.promiseLibrary;
+            this.promiseLibrary = stub.defaultBehavior.promiseLibrary;
         }
+    }
 
-        return behavior;
-    },
-
-    isPresent: function isPresent() {
+    isPresent() {
         return (
             typeof this.callArgAt === "number" ||
             this.exception ||
@@ -146,16 +138,9 @@ const proto = {
             this.fakeFn ||
             this.returnValueDefined
         );
-    },
+    }
 
-    /*eslint complexity: ["error", 20]*/
-    invoke: function invoke(context, args) {
-        /*
-         * callCallback (conditionally) calls ensureArgs
-         *
-         * Note: callCallback intentionally happens before
-         * everything else and cannot be moved lower
-         */
+    invoke(context, args) {
         const returnValue = callCallback(this, args);
 
         if (this.exception) {
@@ -190,11 +175,8 @@ const proto = {
 
             return wrappedMethod.apply(context, args);
         } else if (this.callsThroughWithNew) {
-            // Get the original method (assumed to be a constructor in this case)
             const WrappedClass = this.effectiveWrappedMethod();
-            // Turn the arguments object into a normal array
             const argsArray = slice(args);
-            // Call the constructor
             const F = WrappedClass.bind.apply(
                 WrappedClass,
                 concat([null], argsArray),
@@ -207,45 +189,49 @@ const proto = {
         }
 
         return this.returnValue;
-    },
+    }
 
-    effectiveWrappedMethod: function effectiveWrappedMethod() {
+    effectiveWrappedMethod() {
         for (let stubb = this.stub; stubb; stubb = stubb.parent) {
             if (stubb.wrappedMethod) {
                 return stubb.wrappedMethod;
             }
         }
         throw new Error("Unable to find wrapped method");
-    },
+    }
 
-    onCall: function onCall(index) {
+    onCall(index) {
         return this.stub.onCall(index);
-    },
+    }
 
-    onFirstCall: function onFirstCall() {
+    onFirstCall() {
         return this.stub.onFirstCall();
-    },
+    }
 
-    onSecondCall: function onSecondCall() {
+    onSecondCall() {
         return this.stub.onSecondCall();
-    },
+    }
 
-    onThirdCall: function onThirdCall() {
+    onThirdCall() {
         return this.stub.onThirdCall();
-    },
+    }
 
-    withArgs: function withArgs(/* arguments */) {
+    withArgs() {
         throw new Error(
             'Defining a stub by invoking "stub.onCall(...).withArgs(...)" ' +
                 'is not supported. Use "stub.withArgs(...).onCall(...)" ' +
                 "to define sequential behavior for calls with certain arguments.",
         );
-    },
+    }
+}
+
+Behavior.create = function create(stub) {
+    return new Behavior(stub);
 };
 
 function createBehavior(behaviorMethod) {
     return function () {
-        this.defaultBehavior = this.defaultBehavior || proto.create(this);
+        this.defaultBehavior = this.defaultBehavior || Behavior.create(this);
         this.defaultBehavior[behaviorMethod].apply(
             this.defaultBehavior,
             arguments,
@@ -255,7 +241,7 @@ function createBehavior(behaviorMethod) {
 }
 
 function addBehavior(stub, name, fn) {
-    proto[name] = function () {
+    Behavior.prototype[name] = function () {
         fn.apply(this, concat([this], slice(arguments)));
         return this.stub || this;
     };
@@ -263,9 +249,13 @@ function addBehavior(stub, name, fn) {
     stub[name] = createBehavior(name);
 }
 
-proto.addBehavior = addBehavior;
-proto.createBehavior = createBehavior;
+Behavior.addBehavior = addBehavior;
+Behavior.createBehavior = createBehavior;
 
-const asyncBehaviors = exportAsyncBehaviors(proto);
+const asyncBehaviors = exportAsyncBehaviors(Behavior.prototype);
 
-export default extend.nonEnum({}, proto, asyncBehaviors);
+Object.keys(asyncBehaviors).forEach(function (key) {
+    Behavior.prototype[key] = asyncBehaviors[key];
+});
+
+export default Behavior;
