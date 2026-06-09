@@ -1,0 +1,93 @@
+diff --git a/src/sinon/behavior.js b/src/sinon/behavior.js
+index b8cb081c..98dfdd6b 100644
+--- a/src/sinon/behavior.js
++++ b/src/sinon/behavior.js
+@@ -77,8 +77,6 @@ function getCallbackError(behavior, func, args) {
+ }
+ 
+ function ensureArgs(name, behavior, args) {
+-    // map function name to internal property
+-    //   callsArg => callArgAt
+     const property = name.replace(/sArg/, "ArgAt");
+     const index = behavior[property];
+ 
+@@ -118,6 +116,34 @@ function callCallback(behavior, args) {
+     return undefined;
+ }
+ 
++function isThenable(value) {
++    return (
++        value &&
++        (typeof value === "object" || typeof value === "function") &&
++        typeof value.then === "function"
++    );
++}
++
++function isStandardPromise(value) {
++    return typeof Promise === "function" && value instanceof Promise;
++}
++
++function ensureAsyncReturn(behavior, value) {
++    if (!isThenable(value) || isStandardPromise(value)) {
++        return value;
++    }
++
++    const promiseLibrary =
++        behavior.promiseLibrary ||
++        (typeof Promise === "function" ? Promise : undefined);
++
++    if (!promiseLibrary || typeof promiseLibrary.resolve !== "function") {
++        return value;
++    }
++
++    return promiseLibrary.resolve(value);
++}
++
+ const proto = {
+     create: function create(stub) {
+         const behavior = extend({}, proto);
+@@ -150,12 +176,6 @@ const proto = {
+ 
+     /*eslint complexity: ["error", 20]*/
+     invoke: function invoke(context, args) {
+-        /*
+-         * callCallback (conditionally) calls ensureArgs
+-         *
+-         * Note: callCallback intentionally happens before
+-         * everything else and cannot be moved lower
+-         */
+         const returnValue = callCallback(this, args);
+ 
+         if (this.exception) {
+@@ -188,20 +208,17 @@ const proto = {
+         } else if (this.callsThrough) {
+             const wrappedMethod = this.effectiveWrappedMethod();
+ 
+-            return wrappedMethod.apply(context, args);
++            return ensureAsyncReturn(this, wrappedMethod.apply(context, args));
+         } else if (this.callsThroughWithNew) {
+-            // Get the original method (assumed to be a constructor in this case)
+             const WrappedClass = this.effectiveWrappedMethod();
+-            // Turn the arguments object into a normal array
+             const argsArray = slice(args);
+-            // Call the constructor
+             const F = WrappedClass.bind.apply(
+                 WrappedClass,
+                 concat([null], argsArray),
+             );
+             return new F();
+         } else if (typeof this.returnValue !== "undefined") {
+-            return this.returnValue;
++            return ensureAsyncReturn(this, this.returnValue);
+         } else if (typeof this.callArgAt === "number") {
+             return returnValue;
+         }
+@@ -234,7 +251,7 @@ const proto = {
+         return this.stub.onThirdCall();
+     },
+ 
+-    withArgs: function withArgs(/* arguments */) {
++    withArgs: function withArgs() {
+         throw new Error(
+             'Defining a stub by invoking "stub.onCall(...).withArgs(...)" ' +
+                 'is not supported. Use "stub.withArgs(...).onCall(...)" ' +
