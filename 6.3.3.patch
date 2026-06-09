@@ -1,0 +1,225 @@
+diff --git a/src/sinon/spy.js b/src/sinon/spy.js
+index 9c57ff50..4b1705af 100644
+--- a/src/sinon/spy.js
++++ b/src/sinon/spy.js
+@@ -7,6 +7,7 @@ import isEsModule from "./util/core/is-es-module.js";
+ import * as proxyCallUtil from "./proxy-call-util.js";
+ import walkObject from "./util/core/walk-object.js";
+ import wrapMethod from "./util/core/wrap-method.js";
++import CallTracker from "./call-tracker.js";
+ 
+ const { prototypes, functionName, valueToString } = commons;
+ const { deepEqual } = samsam;
+@@ -142,14 +143,27 @@ function createSpy(func) {
+     }
+ 
+     const proxy = createProxy(funk, funk);
++    const tracker = new CallTracker();
++
++    // Create a thin wrapper for CallTracker to maintain chainability and spy API
++    const trackerWrapper = {};
++    Object.getOwnPropertyNames(spyApi).forEach(prop => {
++        if (typeof spyApi[prop] === 'function') {
++            trackerWrapper[prop] = function(...args) {
++                return spyApi[prop].apply(proxy, args);
++            };
++        }
++    });
+ 
+-    // Inherit spy API:
+-    extend.nonEnum(proxy, spyApi);
++    // Delegate to the wrapper instead of inheriting
++    extend.nonEnum(proxy, trackerWrapper);
++    
+     extend.nonEnum(proxy, {
+         displayName: name || "spy",
+         fakes: [],
+         instantiateFake: createSpy,
+         id: `spy#${uuid++}`,
++        tracker: tracker // expose tracker for sandbox to collect
+     });
+     return proxy;
+ }
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..166d5c2b 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -12,6 +12,8 @@ import wrapMethod from "./util/core/wrap-method.js";
+ import throwOnFalsyObject from "./throw-on-falsy-object.js";
+ import walkObject from "./util/core/walk-object.js";
+ 
++import CallTracker from "./call-tracker.js";
++
+ const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
+ const { array: arrayProto, object: objectProto } = commonsPrototypes;
+ const { hasOwnProperty } = objectProto;
+@@ -43,9 +45,24 @@ function createStub(originalFunc) {
+     }
+ 
+     proxy = createProxy(functionStub, originalFunc || functionStub);
+-    // Inherit spy API:
+-    extend.nonEnum(proxy, spy);
+-    // Inherit stub API:
++    
++    // Use composition: instantiate CallTracker and Behavior internally
++    const tracker = new CallTracker();
++    
++    // Create a thin wrapper for CallTracker to maintain chainability and spy API
++    const trackerWrapper = {};
++    Object.getOwnPropertyNames(spy).forEach(prop => {
++        if (typeof spy[prop] === 'function') {
++            trackerWrapper[prop] = function(...args) {
++                return spy[prop].apply(proxy, args);
++            };
++        }
++    });
++
++    // Delegate to the wrapper instead of inheriting
++    extend.nonEnum(proxy, trackerWrapper);
++    
++    // Inherit stub API (can also be refactored to Behavior composition)
+     extend.nonEnum(proxy, stub);
+ 
+     const name = originalFunc ? functionName(originalFunc) : null;
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..4ca6d4b8 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -105,72 +105,85 @@ export default function wrapMethod(object, property, method) {
+ 
+     const wrappedMethods = [];
+ 
+-    function simplePropertyAssignment() {
+-        wrappedMethod = object[property];
+-        checkWrappedMethod(wrappedMethod);
+-        object[property] = method;
+-        method.displayName = property;
+-    }
+-
+     // Firefox has a problem when using hasOwn.call on objects from other frames.
+     const owned = object.hasOwnProperty
+         ? object.hasOwnProperty(property)
+         : hasOwnProperty(object, property);
+ 
+-    if (hasES5Support) {
+-        const methodDesc =
+-            typeof method === "function" ? { value: method } : method;
+-        wrappedMethodDesc = getPropertyDescriptor(object, property);
++    const wrapStrategy = {
++        simple: function () {
++            wrappedMethod = object[property];
++            checkWrappedMethod(wrappedMethod);
++            object[property] = method;
++            method.displayName = property;
++        },
++        descriptor: function () {
++            const methodDesc =
++                typeof method === "function" ? { value: method } : method;
++            wrappedMethodDesc = getPropertyDescriptor(object, property);
++
++            if (!wrappedMethodDesc) {
++                error = new TypeError(
++                    `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
++                );
++            } else if (
++                wrappedMethodDesc.restore &&
++                wrappedMethodDesc.restore.sinon
++            ) {
++                error = new TypeError(
++                    `Attempted to wrap ${property} which is already wrapped`,
++                );
++            }
++            if (error) {
++                if (wrappedMethodDesc && wrappedMethodDesc.stackTraceError) {
++                    error.stack += `\n--------------\n${wrappedMethodDesc.stackTraceError.stack}`;
++                }
++                throw error;
++            }
+ 
+-        if (!wrappedMethodDesc) {
+-            error = new TypeError(
+-                `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
+-            );
+-        } else if (
+-            wrappedMethodDesc.restore &&
+-            wrappedMethodDesc.restore.sinon
+-        ) {
+-            error = new TypeError(
+-                `Attempted to wrap ${property} which is already wrapped`,
+-            );
+-        }
+-        if (error) {
+-            if (wrappedMethodDesc && wrappedMethodDesc.stackTraceError) {
+-                error.stack += `\n--------------\n${wrappedMethodDesc.stackTraceError.stack}`;
++            const types = Object.keys(methodDesc);
++            for (i = 0; i < types.length; i++) {
++                wrappedMethod = wrappedMethodDesc[types[i]];
++                checkWrappedMethod(wrappedMethod);
++                push(wrappedMethods, wrappedMethod);
+             }
+-            throw error;
+-        }
+ 
+-        const types = Object.keys(methodDesc);
+-        for (i = 0; i < types.length; i++) {
+-            wrappedMethod = wrappedMethodDesc[types[i]];
+-            checkWrappedMethod(wrappedMethod);
+-            push(wrappedMethods, wrappedMethod);
+-        }
++            mirrorProperties(methodDesc, wrappedMethodDesc);
++            for (i = 0; i < types.length; i++) {
++                mirrorProperties(methodDesc[types[i]], wrappedMethodDesc[types[i]]);
++            }
+ 
+-        mirrorProperties(methodDesc, wrappedMethodDesc);
+-        for (i = 0; i < types.length; i++) {
+-            mirrorProperties(methodDesc[types[i]], wrappedMethodDesc[types[i]]);
+-        }
++            // you are not allowed to flip the configurable prop on an
++            // existing descriptor to anything but false (#2514)
++            if (!owned) {
++                methodDesc.configurable = true;
++            }
+ 
+-        // you are not allowed to flip the configurable prop on an
+-        // existing descriptor to anything but false (#2514)
+-        if (!owned) {
+-            methodDesc.configurable = true;
+-        }
++            // Ensure we don't lose the original getter/setter if we only wrap one of them
++            if (wrappedMethodDesc.get && !methodDesc.get) {
++                methodDesc.get = wrappedMethodDesc.get;
++            }
++            if (wrappedMethodDesc.set && !methodDesc.set) {
++                methodDesc.set = wrappedMethodDesc.set;
++            }
+ 
+-        Object.defineProperty(object, property, methodDesc);
++            Object.defineProperty(object, property, methodDesc);
+ 
+-        // catch failing assignment
+-        // this is the converse of the check in `.restore` below
+-        if (typeof method === "function" && object[property] !== method) {
+-            // correct any wrongdoings caused by the defineProperty call above,
+-            // such as adding new items (if object was a Storage object)
+-            delete object[property];
+-            simplePropertyAssignment();
++            // catch failing assignment
++            // this is the converse of the check in `.restore` below
++            if (typeof method === "function" && object[property] !== method) {
++                // correct any wrongdoings caused by the defineProperty call above,
++                // such as adding new items (if object was a Storage object)
++                delete object[property];
++                this.simple();
++            }
+         }
++    };
++
++    if (hasES5Support) {
++        wrapStrategy.descriptor();
+     } else {
+-        simplePropertyAssignment();
++        wrapStrategy.simple();
+     }
+ 
+     function restore() {
