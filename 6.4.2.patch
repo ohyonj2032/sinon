@@ -1,0 +1,186 @@
+diff --git a/src/sinon.js b/src/sinon.js
+index 4f2ad9d7..e3cc57d9 100644
+--- a/src/sinon.js
++++ b/src/sinon.js
+@@ -1,5 +1,10 @@
+ import createApi from "./create-sinon-api.js";
+ 
+ const sinon = createApi();
++const stubESM = sinon.stubESM;
++
++sinon.stubESM = function stubESM(namespace, prop) {
++    return stubESM.call(sinon, namespace, prop);
++};
+ 
+ export default sinon;
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..c7bbd74b 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -130,6 +130,10 @@ export default function Sandbox(opts = {}) {
+             return sandbox.stub.apply(null, arguments);
+         };
+ 
++        obj.stubESM = function stubESM() {
++            return sandbox.stubESM.apply(null, arguments);
++        };
++
+         obj.mock = function mock() {
+             return sandbox.mock.apply(null, arguments);
+         };
+@@ -237,6 +241,22 @@ export default function Sandbox(opts = {}) {
+     });
+     extend(sandbox.stub, sinonStub);
+ 
++    sandbox.stubESM = function stubESM() {
++        const esmStub = sinonStub.createEsmStub.apply(sinonStub, arguments);
++
++        addToCollection(esmStub.stub);
++
++        return esmStub.proxy;
++    };
++    Object.defineProperty(sandbox.stubESM, "name", {
++        value: "stubESM",
++        configurable: true,
++    });
++    Object.defineProperty(sandbox.stubESM, "length", {
++        value: 2,
++        configurable: true,
++    });
++
+     sandbox.mock = function () {
+         const m = sinonMock.apply(null, arguments);
+ 
+@@ -307,6 +327,7 @@ export default function Sandbox(opts = {}) {
+         fakeRestorers.length = 0;
+ 
+         reverse(collection);
++        sinonStub.deactivateEsmStubs(collection);
+         applyOnEach(collection, "restore");
+         collection = [];
+     };
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..55dba902 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -21,10 +21,11 @@ const pop = arrayProto.pop;
+ const slice = arrayProto.slice;
+ const sort = arrayProto.sort;
+ 
++const esmStubStates = new WeakMap();
++
+ let uuid = 0;
+ 
+ function createStub(originalFunc) {
+-    // eslint-disable-next-line prefer-const
+     let proxy;
+ 
+     function functionStub() {
+@@ -43,9 +44,7 @@ function createStub(originalFunc) {
+     }
+ 
+     proxy = createProxy(functionStub, originalFunc || functionStub);
+-    // Inherit spy API:
+     extend.nonEnum(proxy, spy);
+-    // Inherit stub API:
+     extend.nonEnum(proxy, stub);
+ 
+     const name = originalFunc ? functionName(originalFunc) : null;
+@@ -63,6 +62,50 @@ function createStub(originalFunc) {
+     return proxy;
+ }
+ 
++function createEsmNamespaceProxy(namespace, property, esmStub) {
++    const state = {
++        stub: esmStub,
++    };
++
++    const namespaceProxy = new Proxy(namespace, {
++        get(target, prop, receiver) {
++            if (prop === property) {
++                return state.stub || Reflect.get(target, prop, receiver);
++            }
++
++            return Reflect.get(target, prop, receiver);
++        },
++    });
++
++    esmStubStates.set(namespaceProxy, state);
++    esmStubStates.set(esmStub, state);
++
++    extend.nonEnum(esmStub, {
++        rootObj: namespace,
++        propName: property,
++        shadowsPropOnPrototype: false,
++        restore: function restore() {
++            const currentState = esmStubStates.get(esmStub);
++
++            if (currentState) {
++                currentState.stub = null;
++            }
++
++            return namespaceProxy;
++        },
++    });
++
++    return namespaceProxy;
++}
++
++function deactivateEsmStub(fake) {
++    const state = esmStubStates.get(fake);
++
++    if (state) {
++        state.stub = null;
++    }
++}
++
+ export default function stub(object, property) {
+     if (arguments.length > 2) {
+         throw new TypeError(
+@@ -251,4 +294,46 @@ forEach(Object.keys(behaviors), function (method) {
+     }
+ });
+ 
++stub.createEsmStub = function createEsmStub(namespace, property) {
++    throwOnFalsyObject(namespace, property);
++
++    if (typeof property === "undefined") {
++        throw new TypeError("Expected property argument to be defined");
++    }
++
++    if (!isEsModule(namespace)) {
++        throw new TypeError("stubESM requires an ES module namespace object");
++    }
++
++    if (isNonExistentProperty(namespace, property)) {
++        throw new TypeError(
++            `Cannot stub non-existent property ${valueToString(property)}`,
++        );
++    }
++
++    const actualDescriptor = getPropertyDescriptor(namespace, property);
++
++    if (!actualDescriptor || typeof actualDescriptor.value !== "function") {
++        throw new TypeError(
++            `Cannot stub non-function property ${valueToString(property)}`,
++        );
++    }
++
++    const esmStub = createStub(actualDescriptor.value);
++    const namespaceProxy = createEsmNamespaceProxy(
++        namespace,
++        property,
++        esmStub,
++    );
++
++    return {
++        proxy: namespaceProxy,
++        stub: esmStub,
++    };
++};
++
++stub.deactivateEsmStubs = function deactivateEsmStubs(fakes) {
++    forEach(fakes, deactivateEsmStub);
++};
++
+ extend(stub, proto);

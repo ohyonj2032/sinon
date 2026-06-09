@@ -21,10 +21,11 @@ const pop = arrayProto.pop;
 const slice = arrayProto.slice;
 const sort = arrayProto.sort;
 
+const esmStubStates = new WeakMap();
+
 let uuid = 0;
 
 function createStub(originalFunc) {
-    // eslint-disable-next-line prefer-const
     let proxy;
 
     function functionStub() {
@@ -43,9 +44,7 @@ function createStub(originalFunc) {
     }
 
     proxy = createProxy(functionStub, originalFunc || functionStub);
-    // Inherit spy API:
     extend.nonEnum(proxy, spy);
-    // Inherit stub API:
     extend.nonEnum(proxy, stub);
 
     const name = originalFunc ? functionName(originalFunc) : null;
@@ -61,6 +60,50 @@ function createStub(originalFunc) {
     sinonType.set(proxy, "stub");
 
     return proxy;
+}
+
+function createEsmNamespaceProxy(namespace, property, esmStub) {
+    const state = {
+        stub: esmStub,
+    };
+
+    const namespaceProxy = new Proxy(namespace, {
+        get(target, prop, receiver) {
+            if (prop === property) {
+                return state.stub || Reflect.get(target, prop, receiver);
+            }
+
+            return Reflect.get(target, prop, receiver);
+        },
+    });
+
+    esmStubStates.set(namespaceProxy, state);
+    esmStubStates.set(esmStub, state);
+
+    extend.nonEnum(esmStub, {
+        rootObj: namespace,
+        propName: property,
+        shadowsPropOnPrototype: false,
+        restore: function restore() {
+            const currentState = esmStubStates.get(esmStub);
+
+            if (currentState) {
+                currentState.stub = null;
+            }
+
+            return namespaceProxy;
+        },
+    });
+
+    return namespaceProxy;
+}
+
+function deactivateEsmStub(fake) {
+    const state = esmStubStates.get(fake);
+
+    if (state) {
+        state.stub = null;
+    }
 }
 
 export default function stub(object, property) {
@@ -250,5 +293,47 @@ forEach(Object.keys(behaviors), function (method) {
         behavior.addBehavior(stub, method, behaviors[method]);
     }
 });
+
+stub.createEsmStub = function createEsmStub(namespace, property) {
+    throwOnFalsyObject(namespace, property);
+
+    if (typeof property === "undefined") {
+        throw new TypeError("Expected property argument to be defined");
+    }
+
+    if (!isEsModule(namespace)) {
+        throw new TypeError("stubESM requires an ES module namespace object");
+    }
+
+    if (isNonExistentProperty(namespace, property)) {
+        throw new TypeError(
+            `Cannot stub non-existent property ${valueToString(property)}`,
+        );
+    }
+
+    const actualDescriptor = getPropertyDescriptor(namespace, property);
+
+    if (!actualDescriptor || typeof actualDescriptor.value !== "function") {
+        throw new TypeError(
+            `Cannot stub non-function property ${valueToString(property)}`,
+        );
+    }
+
+    const esmStub = createStub(actualDescriptor.value);
+    const namespaceProxy = createEsmNamespaceProxy(
+        namespace,
+        property,
+        esmStub,
+    );
+
+    return {
+        proxy: namespaceProxy,
+        stub: esmStub,
+    };
+};
+
+stub.deactivateEsmStubs = function deactivateEsmStubs(fakes) {
+    forEach(fakes, deactivateEsmStub);
+};
 
 extend(stub, proto);

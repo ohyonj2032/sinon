@@ -130,6 +130,10 @@ export default function Sandbox(opts = {}) {
             return sandbox.stub.apply(null, arguments);
         };
 
+        obj.stubESM = function stubESM() {
+            return sandbox.stubESM.apply(null, arguments);
+        };
+
         obj.mock = function mock() {
             return sandbox.mock.apply(null, arguments);
         };
@@ -237,6 +241,22 @@ export default function Sandbox(opts = {}) {
     });
     extend(sandbox.stub, sinonStub);
 
+    sandbox.stubESM = function stubESM() {
+        const esmStub = sinonStub.createEsmStub.apply(sinonStub, arguments);
+
+        addToCollection(esmStub.stub);
+
+        return esmStub.proxy;
+    };
+    Object.defineProperty(sandbox.stubESM, "name", {
+        value: "stubESM",
+        configurable: true,
+    });
+    Object.defineProperty(sandbox.stubESM, "length", {
+        value: 2,
+        configurable: true,
+    });
+
     sandbox.mock = function () {
         const m = sinonMock.apply(null, arguments);
 
@@ -307,6 +327,7 @@ export default function Sandbox(opts = {}) {
         fakeRestorers.length = 0;
 
         reverse(collection);
+        sinonStub.deactivateEsmStubs(collection);
         applyOnEach(collection, "restore");
         collection = [];
     };
