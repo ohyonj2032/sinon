@@ -23,6 +23,8 @@ const sort = arrayProto.sort;
 
 let uuid = 0;
 
+const esmStubRegistry = new WeakMap();
+
 function createStub(originalFunc) {
     // eslint-disable-next-line prefer-const
     let proxy;
@@ -61,6 +63,100 @@ function createStub(originalFunc) {
     sinonType.set(proxy, "stub");
 
     return proxy;
+}
+
+function createEsmStub(namespace, prop) {
+    if (!namespace || typeof namespace !== "object") {
+        throw new TypeError("stubESM requires an object namespace");
+    }
+
+    if (typeof prop === "undefined") {
+        throw new TypeError("stubESM requires a property name");
+    }
+
+    const originalValue = namespace[prop];
+    const originalFunc =
+        typeof originalValue === "function" ? originalValue : null;
+
+    // eslint-disable-next-line prefer-const
+    let proxyStub;
+
+    function functionStub() {
+        const args = slice(arguments);
+        const matchings = proxyStub.matchingFakes
+            ? proxyStub.matchingFakes(args)
+            : [];
+
+        const fnStub =
+            pop(
+                sort(matchings, function (a, b) {
+                    return (
+                        a.matchingArguments.length - b.matchingArguments.length
+                    );
+                }),
+            ) || proxyStub;
+        return getCurrentBehavior(fnStub).invoke(this, arguments);
+    }
+
+    proxyStub = createProxy(functionStub, originalFunc || functionStub);
+    extend.nonEnum(proxyStub, spy);
+    extend.nonEnum(proxyStub, stub);
+
+    const name = originalFunc ? functionName(originalFunc) : null;
+    extend.nonEnum(proxyStub, {
+        fakes: [],
+        instantiateFake: createStub,
+        displayName: name || `stub(${String(prop)})`,
+        defaultBehavior: null,
+        behaviors: [],
+        id: `stubESM#${uuid++}`,
+        isEsmStub: true,
+        rootObj: namespace,
+        propName: prop,
+        wrappedMethod: originalFunc,
+    });
+
+    sinonType.set(proxyStub, "stub");
+
+    const restoreRef = { current: proxyStub };
+
+    const handler = {
+        get: function (target, key) {
+            if (key === prop) {
+                const ref = restoreRef.current;
+                if (!ref) {
+                    return target[prop];
+                }
+                return ref;
+            }
+            return target[key];
+        },
+    };
+
+    const proxiedNamespace = new Proxy(namespace, handler);
+
+    esmStubRegistry.set(proxiedNamespace, {
+        stub: proxyStub,
+        restoreRef: restoreRef,
+        originalValue: originalValue,
+        prop: prop,
+    });
+
+    proxyStub.restore = function restore() {
+        const entry = esmStubRegistry.get(proxiedNamespace);
+        if (entry) {
+            entry.restoreRef.current = null;
+            proxyStub.defaultBehavior = null;
+            proxyStub.behaviors = [];
+            proxyStub.fakes = [];
+            proxyStub.resetHistory();
+        }
+    };
+
+    return {
+        proxy: proxiedNamespace,
+        stub: proxyStub,
+    };
 }
 
 export default function stub(object, property) {
@@ -252,3 +348,6 @@ forEach(Object.keys(behaviors), function (method) {
 });
 
 extend(stub, proto);
+
+stub.createEsmStub = createEsmStub;
+stub.esmStubRegistry = esmStubRegistry;

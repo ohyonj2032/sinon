@@ -1,0 +1,179 @@
+diff --git a/src/sinon.js b/src/sinon.js
+index 4f2ad9d7..b1d81856 100644
+--- a/src/sinon.js
++++ b/src/sinon.js
+@@ -1,5 +1,10 @@
+ import createApi from "./create-sinon-api.js";
++import sinonStub from "./sinon/stub.js";
+ 
+ const sinon = createApi();
+ 
++sinon.stubESM = function stubESM(namespace, prop) {
++    return sinonStub.createEsmStub(namespace, prop);
++};
++
+ export default sinon;
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..95374031 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
+ import sinonCreateStubInstance from "./create-stub-instance.js";
+ import sinonFake from "./fake.js";
+ import extend from "./util/core/extend.js";
++import isEsModule from "./util/core/is-es-module.js";
+ 
+ const { array: arrayProto } = commons.prototypes;
+ const { deprecated: logger, valueToString } = commons;
+@@ -237,6 +238,30 @@ export default function Sandbox(opts = {}) {
+     });
+     extend(sandbox.stub, sinonStub);
+ 
++    sandbox.stubESM = function (namespace, prop) {
++        if (!namespace || typeof namespace !== "object") {
++            throw new TypeError("stubESM requires an object namespace");
++        }
++
++        if (typeof prop === "undefined") {
++            throw new TypeError("stubESM requires a property name");
++        }
++
++        const result = sinonStub.createEsmStub(namespace, prop);
++
++        addToCollection(result.stub);
++
++        return result;
++    };
++    Object.defineProperty(sandbox.stubESM, "name", {
++        value: "stubESM",
++        configurable: true,
++    });
++    Object.defineProperty(sandbox.stubESM, "length", {
++        value: 2,
++        configurable: true,
++    });
++
+     sandbox.mock = function () {
+         const m = sinonMock.apply(null, arguments);
+ 
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..74ca1867 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -23,6 +23,8 @@ const sort = arrayProto.sort;
+ 
+ let uuid = 0;
+ 
++const esmStubRegistry = new WeakMap();
++
+ function createStub(originalFunc) {
+     // eslint-disable-next-line prefer-const
+     let proxy;
+@@ -63,6 +65,100 @@ function createStub(originalFunc) {
+     return proxy;
+ }
+ 
++function createEsmStub(namespace, prop) {
++    if (!namespace || typeof namespace !== "object") {
++        throw new TypeError("stubESM requires an object namespace");
++    }
++
++    if (typeof prop === "undefined") {
++        throw new TypeError("stubESM requires a property name");
++    }
++
++    const originalValue = namespace[prop];
++    const originalFunc =
++        typeof originalValue === "function" ? originalValue : null;
++
++    // eslint-disable-next-line prefer-const
++    let proxyStub;
++
++    function functionStub() {
++        const args = slice(arguments);
++        const matchings = proxyStub.matchingFakes
++            ? proxyStub.matchingFakes(args)
++            : [];
++
++        const fnStub =
++            pop(
++                sort(matchings, function (a, b) {
++                    return (
++                        a.matchingArguments.length - b.matchingArguments.length
++                    );
++                }),
++            ) || proxyStub;
++        return getCurrentBehavior(fnStub).invoke(this, arguments);
++    }
++
++    proxyStub = createProxy(functionStub, originalFunc || functionStub);
++    extend.nonEnum(proxyStub, spy);
++    extend.nonEnum(proxyStub, stub);
++
++    const name = originalFunc ? functionName(originalFunc) : null;
++    extend.nonEnum(proxyStub, {
++        fakes: [],
++        instantiateFake: createStub,
++        displayName: name || `stub(${String(prop)})`,
++        defaultBehavior: null,
++        behaviors: [],
++        id: `stubESM#${uuid++}`,
++        isEsmStub: true,
++        rootObj: namespace,
++        propName: prop,
++        wrappedMethod: originalFunc,
++    });
++
++    sinonType.set(proxyStub, "stub");
++
++    const restoreRef = { current: proxyStub };
++
++    const handler = {
++        get: function (target, key) {
++            if (key === prop) {
++                const ref = restoreRef.current;
++                if (!ref) {
++                    return target[prop];
++                }
++                return ref;
++            }
++            return target[key];
++        },
++    };
++
++    const proxiedNamespace = new Proxy(namespace, handler);
++
++    esmStubRegistry.set(proxiedNamespace, {
++        stub: proxyStub,
++        restoreRef: restoreRef,
++        originalValue: originalValue,
++        prop: prop,
++    });
++
++    proxyStub.restore = function restore() {
++        const entry = esmStubRegistry.get(proxiedNamespace);
++        if (entry) {
++            entry.restoreRef.current = null;
++            proxyStub.defaultBehavior = null;
++            proxyStub.behaviors = [];
++            proxyStub.fakes = [];
++            proxyStub.resetHistory();
++        }
++    };
++
++    return {
++        proxy: proxiedNamespace,
++        stub: proxyStub,
++    };
++}
++
+ export default function stub(object, property) {
+     if (arguments.length > 2) {
+         throw new TypeError(
+@@ -252,3 +348,6 @@ forEach(Object.keys(behaviors), function (method) {
+ });
+ 
+ extend(stub, proto);
++
++stub.createEsmStub = createEsmStub;
++stub.esmStubRegistry = esmStubRegistry;

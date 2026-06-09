@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
 import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
+import isEsModule from "./util/core/is-es-module.js";
 
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
@@ -236,6 +237,30 @@ export default function Sandbox(opts = {}) {
         configurable: true,
     });
     extend(sandbox.stub, sinonStub);
+
+    sandbox.stubESM = function (namespace, prop) {
+        if (!namespace || typeof namespace !== "object") {
+            throw new TypeError("stubESM requires an object namespace");
+        }
+
+        if (typeof prop === "undefined") {
+            throw new TypeError("stubESM requires a property name");
+        }
+
+        const result = sinonStub.createEsmStub(namespace, prop);
+
+        addToCollection(result.stub);
+
+        return result;
+    };
+    Object.defineProperty(sandbox.stubESM, "name", {
+        value: "stubESM",
+        configurable: true,
+    });
+    Object.defineProperty(sandbox.stubESM, "length", {
+        value: 2,
+        configurable: true,
+    });
 
     sandbox.mock = function () {
         const m = sinonMock.apply(null, arguments);
