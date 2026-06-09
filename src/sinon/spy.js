@@ -1,5 +1,6 @@
 import commons from "@sinonjs/commons";
 import samsam from "@sinonjs/samsam";
+import createCallTracker from "./call-tracker.js";
 import createProxy from "./proxy.js";
 import extend from "./util/core/extend.js";
 import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
@@ -8,16 +9,10 @@ import * as proxyCallUtil from "./proxy-call-util.js";
 import walkObject from "./util/core/walk-object.js";
 import wrapMethod from "./util/core/wrap-method.js";
 
-const { prototypes, functionName, valueToString } = commons;
+const { functionName } = commons;
 const { deepEqual } = samsam;
-const { forEach, pop, push, slice } = prototypes.array;
+const { forEach, pop, push, slice } = Array.prototype;
 const filter = Array.prototype.filter;
-
-/**
- * @callback SinonFunction
- * @param {...unknown} args
- * @returns {unknown}
- */
 
 let uuid = 0;
 
@@ -32,7 +27,6 @@ function matches(fake, args, strict) {
     return false;
 }
 
-// Public API
 const spyApi = {
     withArgs: function () {
         const args = slice(arguments);
@@ -69,7 +63,6 @@ const spyApi = {
         return fakeInstance;
     },
 
-    // Override proxy default implementation
     matchingFakes: function (args, strict) {
         return filter.call(this.fakes, function (fakeInstance) {
             return matches(fakeInstance, args, strict);
@@ -100,7 +93,6 @@ delegateToCalls(spyApi, "yield", false, "yield", true, function () {
         `${this.toString()} cannot yield since it was not yet invoked.`,
     );
 });
-// "invokeCallback" is an alias for "yield" since "yield" is invalid in strict mode.
 spyApi.invokeCallback = spyApi.yield;
 delegateToCalls(spyApi, "yieldOn", false, "yieldOn", true, function () {
     throw new Error(
@@ -109,7 +101,7 @@ delegateToCalls(spyApi, "yieldOn", false, "yieldOn", true, function () {
 });
 delegateToCalls(spyApi, "yieldTo", false, "yieldTo", true, function (property) {
     throw new Error(
-        `${this.toString()} cannot yield to '${valueToString(
+        `${this.toString()} cannot yield to '${String(
             property,
         )}' since it was not yet invoked.`,
     );
@@ -122,7 +114,7 @@ delegateToCalls(
     true,
     function (property) {
         throw new Error(
-            `${this.toString()} cannot yield to '${valueToString(
+            `${this.toString()} cannot yield to '${String(
                 property,
             )}' since it was not yet invoked.`,
         );
@@ -143,7 +135,9 @@ function createSpy(func) {
 
     const proxy = createProxy(funk, funk);
 
-    // Inherit spy API:
+    const tracker = createCallTracker();
+    extend.nonEnum(proxy, tracker);
+
     extend.nonEnum(proxy, spyApi);
     extend.nonEnum(proxy, {
         displayName: name || "spy",
@@ -154,14 +148,6 @@ function createSpy(func) {
     return proxy;
 }
 
-/**
- * Creates a spy.
- *
- * @param {object|SinonFunction} [object] The object or function to spy on
- * @param {string} [property] The property name to spy on
- * @param {Array} [types] Types of accessor to spy on (get, set)
- * @returns {SinonFunction|object} The spy or an object with spied accessors
- */
 export default function spy(object, property, types) {
     if (isEsModule(object)) {
         throw new TypeError("ES Modules cannot be spied");

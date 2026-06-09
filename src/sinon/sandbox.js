@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
 import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
+import createCallTracker from "./call-tracker.js";
 
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
@@ -100,6 +101,30 @@ export default function Sandbox(opts = {}) {
                     "To disable this warning, modify the leakThreshold property of your sandbox.",
             );
             loggedLeakWarning = true;
+        }
+
+        if (
+            object &&
+            typeof object.resetHistory === "function" &&
+            object.callCount !== undefined
+        ) {
+            if (!object._sandboxTracked) {
+                object._sandboxTracked = true;
+            }
+        }
+    }
+
+    function disposeTrackers() {
+        for (let i = collection.length - 1; i >= 0; i--) {
+            const fake = collection[i];
+            if (fake && fake._sandboxTracked) {
+                if (fake.fakes) {
+                    forEach(fake.fakes, function (subFake) {
+                        subFake._sandboxTracked = false;
+                    });
+                }
+                fake._sandboxTracked = false;
+            }
         }
     }
 
@@ -308,6 +333,9 @@ export default function Sandbox(opts = {}) {
 
         reverse(collection);
         applyOnEach(collection, "restore");
+
+        disposeTrackers();
+
         collection = [];
     };
 

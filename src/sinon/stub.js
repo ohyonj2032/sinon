@@ -1,6 +1,8 @@
 import commons from "@sinonjs/commons";
+import samsam from "@sinonjs/samsam";
 import behavior from "./behavior.js";
 import behaviors from "./default-behaviors.js";
+import createCallTracker from "./call-tracker.js";
 import createProxy from "./proxy.js";
 import isNonExistentProperty from "./util/core/is-non-existent-property.js";
 import spy from "./spy.js";
@@ -15,16 +17,28 @@ import walkObject from "./util/core/walk-object.js";
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto, object: objectProto } = commonsPrototypes;
 const { hasOwnProperty } = objectProto;
+const { deepEqual } = samsam;
 
 const forEach = arrayProto.forEach;
+const filter = arrayProto.filter;
 const pop = arrayProto.pop;
 const slice = arrayProto.slice;
 const sort = arrayProto.sort;
 
 let uuid = 0;
 
+function matches(fake, args, strict) {
+    const margs = fake.matchingArguments;
+    if (
+        margs.length <= args.length &&
+        deepEqual(slice(args, 0, margs.length), margs)
+    ) {
+        return !strict || margs.length === args.length;
+    }
+    return false;
+}
+
 function createStub(originalFunc) {
-    // eslint-disable-next-line prefer-const
     let proxy;
 
     function functionStub() {
@@ -43,9 +57,10 @@ function createStub(originalFunc) {
     }
 
     proxy = createProxy(functionStub, originalFunc || functionStub);
-    // Inherit spy API:
-    extend.nonEnum(proxy, spy);
-    // Inherit stub API:
+
+    const tracker = createCallTracker();
+    extend.nonEnum(proxy, tracker);
+
     extend.nonEnum(proxy, stub);
 
     const name = originalFunc ? functionName(originalFunc) : null;
@@ -180,6 +195,12 @@ function getCurrentBehavior(stubInstance) {
 }
 
 const proto = {
+    matchingFakes: function (args, strict) {
+        return filter.call(this.fakes, function (fakeInstance) {
+            return matches(fakeInstance, args, strict);
+        });
+    },
+
     resetBehavior: function () {
         this.defaultBehavior = null;
         this.behaviors = [];

@@ -1,25 +1,12 @@
 import commons from "@sinonjs/commons";
+import createCallTracker from "./call-tracker.js";
 import createProxy from "./proxy.js";
+import extend from "./util/core/extend.js";
 import nextTick from "./util/core/next-tick.js";
 
 const { prototypes } = commons;
 const { slice } = prototypes.array;
 
-/**
- * @callback SinonFunction
- * @param {...unknown} args
- * @returns {unknown}
- */
-
-/**
- * Returns a `fake` that records all calls, arguments and return values.
- *
- * When an `f` argument is supplied, this implementation will be used.
- *
- * @param {SinonFunction|undefined} [f]
- * @returns {SinonFunction}
- * @namespace
- */
 function fake(f) {
     if (arguments.length > 0 && typeof f !== "function") {
         throw new TypeError("Expected f argument to be a Function");
@@ -28,14 +15,6 @@ function fake(f) {
     return wrapFunc(f);
 }
 
-/**
- * Creates a `fake` that returns the provided `value`, as well as recording all
- * calls, arguments and return values.
- *
- * @memberof fake
- * @param {unknown} value
- * @returns {SinonFunction}
- */
 fake.returns = function returns(value) {
     function f() {
         return value;
@@ -44,13 +23,6 @@ fake.returns = function returns(value) {
     return wrapFunc(f);
 };
 
-/**
- * Creates a `fake` that throws an Error.
- *
- * @memberof fake
- * @param {unknown|Error} value
- * @returns {SinonFunction}
- */
 fake.throws = function throws(value) {
     function f() {
         throw getError(value);
@@ -59,13 +31,6 @@ fake.throws = function throws(value) {
     return wrapFunc(f);
 };
 
-/**
- * Creates a `fake` that returns a promise that resolves to the passed `value`
- *
- * @memberof fake
- * @param {unknown} value
- * @returns {SinonFunction}
- */
 fake.resolves = function resolves(value) {
     function f() {
         return Promise.resolve(value);
@@ -74,13 +39,6 @@ fake.resolves = function resolves(value) {
     return wrapFunc(f);
 };
 
-/**
- * Creates a `fake` that returns a promise that rejects to the passed `value`
- *
- * @memberof fake
- * @param {unknown} value
- * @returns {SinonFunction}
- */
 fake.rejects = function rejects(value) {
     function f() {
         return Promise.reject(getError(value));
@@ -89,12 +47,6 @@ fake.rejects = function rejects(value) {
     return wrapFunc(f);
 };
 
-/**
- * Returns a `fake` that calls the callback with the defined arguments.
- *
- * @memberof fake
- * @returns {SinonFunction}
- */
 fake.yields = function yields() {
     const values = slice(arguments);
 
@@ -110,13 +62,6 @@ fake.yields = function yields() {
     return wrapFunc(f);
 };
 
-/**
- * Returns a `fake` that calls the callback **asynchronously** with the
- * defined arguments.
- *
- * @memberof fake
- * @returns {SinonFunction}
- */
 fake.yieldsAsync = function yieldsAsync() {
     const values = slice(arguments);
 
@@ -134,13 +79,7 @@ fake.yieldsAsync = function yieldsAsync() {
 };
 
 let uuid = 0;
-/**
- * Creates a proxy (sinon concept) from the passed function.
- *
- * @private
- * @param  {SinonFunction} f
- * @returns {SinonFunction}
- */
+
 function wrapFunc(f) {
     const fakeInstance = function () {
         let firstArg, lastArg;
@@ -153,7 +92,6 @@ function wrapFunc(f) {
         const callback =
             lastArg && typeof lastArg === "function" ? lastArg : undefined;
 
-        /* eslint-disable no-use-before-define */
         proxy.firstArg = firstArg;
         proxy.lastArg = lastArg;
         proxy.callback = callback;
@@ -161,6 +99,9 @@ function wrapFunc(f) {
         return f && f.apply(this, arguments);
     };
     const proxy = createProxy(fakeInstance, f || fakeInstance);
+
+    const tracker = createCallTracker();
+    extend.nonEnum(proxy, tracker);
 
     Object.defineProperty(proxy, "name", {
         value: "fake",
@@ -173,14 +114,6 @@ function wrapFunc(f) {
     return proxy;
 }
 
-/**
- * Returns an Error instance from the passed value, if the value is not
- * already an Error instance.
- *
- * @private
- * @param  {unknown} value [description]
- * @returns {Error}       [description]
- */
 function getError(value) {
     return value instanceof Error ? value : new Error(value);
 }
