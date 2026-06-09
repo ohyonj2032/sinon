@@ -8,13 +8,6 @@ import sinonType from "./sinon-type.js";
 const { hasOwnProperty } = prototypes.object;
 const { push } = prototypes.array;
 
-/**
- * @callback SinonFunction
- * @param {...unknown} args
- * @returns {unknown}
- */
-
-// eslint-disable-next-line no-empty-function
 const noop = () => {};
 
 function isFunction(obj) {
@@ -25,6 +18,10 @@ function isFunction(obj) {
 }
 
 function mirrorProperties(target, source) {
+    if (!source || typeof target !== "function") {
+        return;
+    }
+
     for (const prop in source) {
         if (!hasOwnProperty(target, prop)) {
             target[prop] = source[prop];
@@ -32,32 +29,318 @@ function mirrorProperties(target, source) {
     }
 }
 
-function getAccessor(object, property, method) {
-    const accessors = ["get", "set"];
-    const descriptor = getPropertyDescriptor(object, property);
+function checkWrappedMethod(wrappedMethod, property) {
+    let error;
 
-    for (let i = 0; i < accessors.length; i++) {
-        if (
-            descriptor[accessors[i]] &&
-            descriptor[accessors[i]].name === method.name
-        ) {
-            return accessors[i];
-        }
+    if (!isFunction(wrappedMethod)) {
+        error = new TypeError(
+            `Attempted to wrap ${typeof wrappedMethod} property ${valueToString(
+                property,
+            )} as function`,
+        );
+    } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
+        error = new TypeError(
+            `Attempted to wrap ${valueToString(
+                property,
+            )} which is already wrapped`,
+        );
+    } else if (wrappedMethod.calledBefore) {
+        const verb = wrappedMethod.returns ? "stubbed" : "spied on";
+        error = new TypeError(
+            `Attempted to wrap ${valueToString(
+                property,
+            )} which is already ${verb}`,
+        );
     }
-    return null;
+
+    if (error) {
+        if (wrappedMethod && wrappedMethod.stackTraceError) {
+            error.stack += `\n--------------\n${wrappedMethod.stackTraceError.stack}`;
+        }
+        throw error;
+    }
 }
 
-// Cheap way to detect if we have ES5 support.
+function toPropertyDescriptor(descriptor) {
+    if (!descriptor) {
+        return descriptor;
+    }
+
+    const copy = {};
+    const keys = [
+        "configurable",
+        "enumerable",
+        "writable",
+        "value",
+        "get",
+        "set",
+    ];
+
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(descriptor, key)) {
+            copy[key] = descriptor[key];
+        }
+    }
+
+    return copy;
+}
+
+function getMethodDescriptor(method) {
+    return typeof method === "function" ? { value: method } : method;
+}
+
+function isAccessorDescriptor(descriptor) {
+    return descriptor && ("get" in descriptor || "set" in descriptor);
+}
+
+function getReplacementKeys(methodDescriptor) {
+    if (isAccessorDescriptor(methodDescriptor)) {
+        return ["get", "set"].filter(function (key) {
+            return typeof methodDescriptor[key] === "function";
+        });
+    }
+
+    return ["value"];
+}
+
+function composeReplacementDescriptor(originalDescriptor, methodDescriptor, owned) {
+    const descriptor = toPropertyDescriptor(originalDescriptor) || {};
+
+    for (const key of Object.keys(methodDescriptor)) {
+        descriptor[key] = methodDescriptor[key];
+    }
+
+    if (isAccessorDescriptor(methodDescriptor)) {
+        delete descriptor.value;
+        delete descriptor.writable;
+    } else {
+        delete descriptor.get;
+        delete descriptor.set;
+    }
+
+    if (!owned) {
+        descriptor.configurable = true;
+    }
+
+    return descriptor;
+}
+
+function getWrappedMethodRecords(originalDescriptor, methodDescriptor, property) {
+    const records = [];
+
+    for (const key of getReplacementKeys(methodDescriptor)) {
+        const wrappedMethod = originalDescriptor[key];
+        checkWrappedMethod(wrappedMethod, property);
+        push(records, {
+            accessor: key === "value" ? null : key,
+            wrappedMethod: wrappedMethod,
+            target: key === "value" ? methodDescriptor.value : methodDescriptor[key],
+        });
+    }
+
+    return records;
+}
+
+function attachRestoreMetadata(method, records, property, restore) {
+    for (const record of records) {
+        extend.nonEnum(record.target, {
+            displayName: property,
+            wrappedMethod: record.wrappedMethod,
+            stackTraceError: new Error("Stack Trace for original"),
+            restore: restore,
+        });
+
+        record.target.restore.sinon = true;
+    }
+
+    if (typeof method === "object") {
+        const target = records[0] && records[0].target;
+        if (target && target.restore) {
+            extend.nonEnum(method, {
+                restore: target.restore,
+            });
+        }
+    }
+}
+
 const hasES5Support = "keys" in Object;
 
-/**
- * Wraps a method on an object with another function.
- *
- * @param {object} object The object containing the method
- * @param {string | symbol} property The property name of the method to wrap
- * @param {SinonFunction|object} method The wrapper function or a property descriptor
- * @returns {SinonFunction} The wrapped method
- */
+const replacementStrategies = {
+    assignment: {
+        match: function () {
+            return !hasES5Support;
+        },
+        apply: function (context) {
+            const wrappedMethod = context.object[context.property];
+            checkWrappedMethod(wrappedMethod, context.property);
+            context.object[context.property] = context.method;
+            context.method.displayName = context.property;
+            context.records = [
+                {
+                    accessor: null,
+                    wrappedMethod: wrappedMethod,
+                    target: context.method,
+                },
+            ];
+        },
+        restore: function (context, target) {
+            if (!context.owned) {
+                try {
+                    delete context.object[context.property];
+                } catch (e) {}
+            }
+
+            if (context.object[context.property] === target) {
+                context.object[context.property] = context.originalDescriptor.value;
+            }
+        },
+    },
+    accessorDescriptor: {
+        match: function (context) {
+            return isAccessorDescriptor(context.methodDescriptor);
+        },
+        apply: function (context) {
+            context.records = getWrappedMethodRecords(
+                context.originalDescriptor,
+                context.methodDescriptor,
+                context.property,
+            );
+
+            for (const record of context.records) {
+                mirrorProperties(record.target, record.wrappedMethod);
+            }
+
+            context.appliedDescriptor = composeReplacementDescriptor(
+                context.originalDescriptor,
+                context.methodDescriptor,
+                context.owned,
+            );
+
+            Object.defineProperty(
+                context.object,
+                context.property,
+                context.appliedDescriptor,
+            );
+        },
+        restore: function (context) {
+            if (context.owned) {
+                Object.defineProperty(
+                    context.object,
+                    context.property,
+                    toPropertyDescriptor(context.originalDescriptor),
+                );
+                return;
+            }
+
+            try {
+                delete context.object[context.property];
+            } catch (e) {}
+
+            if (Object.getOwnPropertyDescriptor(context.object, context.property)) {
+                Object.defineProperty(
+                    context.object,
+                    context.property,
+                    toPropertyDescriptor(context.originalDescriptor),
+                );
+            }
+        },
+    },
+    dataDescriptor: {
+        match: function () {
+            return true;
+        },
+        apply: function (context) {
+            context.records = getWrappedMethodRecords(
+                context.originalDescriptor,
+                context.methodDescriptor,
+                context.property,
+            );
+            const wrappedMethod = context.records[0].wrappedMethod;
+
+            mirrorProperties(context.methodDescriptor.value, wrappedMethod);
+
+            context.appliedDescriptor = composeReplacementDescriptor(
+                context.originalDescriptor,
+                context.methodDescriptor,
+                context.owned,
+            );
+
+            Object.defineProperty(
+                context.object,
+                context.property,
+                context.appliedDescriptor,
+            );
+
+            if (
+                typeof context.method === "function" &&
+                context.object[context.property] !== context.method
+            ) {
+                delete context.object[context.property];
+                replacementStrategies.assignment.apply(context);
+                context.strategy = replacementStrategies.assignment;
+            }
+        },
+        restore: function (context, target) {
+            if (context.owned) {
+                Object.defineProperty(
+                    context.object,
+                    context.property,
+                    toPropertyDescriptor(context.originalDescriptor),
+                );
+            } else {
+                try {
+                    delete context.object[context.property];
+                } catch (e) {}
+            }
+
+            const descriptor = getPropertyDescriptor(context.object, context.property);
+            if (descriptor && descriptor.value === target) {
+                context.object[context.property] = context.originalDescriptor.value;
+            }
+        },
+    },
+};
+
+function getReplacementStrategy(context) {
+    if (!context.originalDescriptor) {
+        throw new TypeError(
+            `Attempted to wrap ${typeof context.object[context.property]} property ${valueToString(
+                context.property,
+            )} as function`,
+        );
+    }
+
+    if (
+        context.originalDescriptor.restore &&
+        context.originalDescriptor.restore.sinon
+    ) {
+        const error = new TypeError(
+            `Attempted to wrap ${valueToString(
+                context.property,
+            )} which is already wrapped`,
+        );
+        if (context.originalDescriptor.stackTraceError) {
+            error.stack +=
+                `\n--------------\n${context.originalDescriptor.stackTraceError.stack}`;
+        }
+        throw error;
+    }
+
+    const strategies = [
+        replacementStrategies.assignment,
+        replacementStrategies.accessorDescriptor,
+        replacementStrategies.dataDescriptor,
+    ];
+
+    for (const strategy of strategies) {
+        if (strategy.match(context)) {
+            return strategy;
+        }
+    }
+
+    return replacementStrategies.dataDescriptor;
+}
+
 export default function wrapMethod(object, property, method) {
     if (!object) {
         throw new TypeError("Should wrap property of object");
@@ -69,192 +352,36 @@ export default function wrapMethod(object, property, method) {
         );
     }
 
-    function checkWrappedMethod(wrappedMethod) {
-        let error;
-
-        if (!isFunction(wrappedMethod)) {
-            error = new TypeError(
-                `Attempted to wrap ${typeof wrappedMethod} property ${valueToString(
-                    property,
-                )} as function`,
-            );
-        } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
-            error = new TypeError(
-                `Attempted to wrap ${valueToString(
-                    property,
-                )} which is already wrapped`,
-            );
-        } else if (wrappedMethod.calledBefore) {
-            const verb = wrappedMethod.returns ? "stubbed" : "spied on";
-            error = new TypeError(
-                `Attempted to wrap ${valueToString(
-                    property,
-                )} which is already ${verb}`,
-            );
-        }
-
-        if (error) {
-            if (wrappedMethod && wrappedMethod.stackTraceError) {
-                error.stack += `\n--------------\n${wrappedMethod.stackTraceError.stack}`;
-            }
-            throw error;
-        }
-    }
-
-    let error, wrappedMethod, i, wrappedMethodDesc, target, accessor;
-
-    const wrappedMethods = [];
-
-    function simplePropertyAssignment() {
-        wrappedMethod = object[property];
-        checkWrappedMethod(wrappedMethod);
-        object[property] = method;
-        method.displayName = property;
-    }
-
-    // Firefox has a problem when using hasOwn.call on objects from other frames.
     const owned = object.hasOwnProperty
         ? object.hasOwnProperty(property)
         : hasOwnProperty(object, property);
+    const methodDescriptor = getMethodDescriptor(method);
+    const originalDescriptor = hasES5Support
+        ? getPropertyDescriptor(object, property)
+        : { value: object[property] };
+    const context = {
+        object: object,
+        property: property,
+        method: method,
+        methodDescriptor: methodDescriptor,
+        originalDescriptor: originalDescriptor,
+        owned: owned,
+        records: [],
+    };
+    const strategy = getReplacementStrategy(context);
+    context.strategy = strategy;
 
-    if (hasES5Support) {
-        const methodDesc =
-            typeof method === "function" ? { value: method } : method;
-        wrappedMethodDesc = getPropertyDescriptor(object, property);
-
-        if (!wrappedMethodDesc) {
-            error = new TypeError(
-                `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
-            );
-        } else if (
-            wrappedMethodDesc.restore &&
-            wrappedMethodDesc.restore.sinon
-        ) {
-            error = new TypeError(
-                `Attempted to wrap ${property} which is already wrapped`,
-            );
-        }
-        if (error) {
-            if (wrappedMethodDesc && wrappedMethodDesc.stackTraceError) {
-                error.stack += `\n--------------\n${wrappedMethodDesc.stackTraceError.stack}`;
-            }
-            throw error;
-        }
-
-        const types = Object.keys(methodDesc);
-        for (i = 0; i < types.length; i++) {
-            wrappedMethod = wrappedMethodDesc[types[i]];
-            checkWrappedMethod(wrappedMethod);
-            push(wrappedMethods, wrappedMethod);
-        }
-
-        mirrorProperties(methodDesc, wrappedMethodDesc);
-        for (i = 0; i < types.length; i++) {
-            mirrorProperties(methodDesc[types[i]], wrappedMethodDesc[types[i]]);
-        }
-
-        // you are not allowed to flip the configurable prop on an
-        // existing descriptor to anything but false (#2514)
-        if (!owned) {
-            methodDesc.configurable = true;
-        }
-
-        Object.defineProperty(object, property, methodDesc);
-
-        // catch failing assignment
-        // this is the converse of the check in `.restore` below
-        if (typeof method === "function" && object[property] !== method) {
-            // correct any wrongdoings caused by the defineProperty call above,
-            // such as adding new items (if object was a Storage object)
-            delete object[property];
-            simplePropertyAssignment();
-        }
-    } else {
-        simplePropertyAssignment();
-    }
+    strategy.apply(context);
 
     function restore() {
-        accessor = getAccessor(object, property, this.wrappedMethod);
-        let descriptor;
-        // For prototype properties try to reset by delete first.
-        // If this fails (ex: localStorage on mobile safari) then force a reset
-        // via direct assignment.
-        if (accessor) {
-            if (!owned) {
-                try {
-                    // In some cases `delete` may throw an error
-                    delete object[property][accessor];
-                } catch (e) {} // eslint-disable-line no-empty
-                // For native code functions `delete` fails without throwing an error
-                // on Chrome < 43, PhantomJS, etc.
-            } else if (hasES5Support) {
-                descriptor = getPropertyDescriptor(object, property);
-                descriptor[accessor] = wrappedMethodDesc[accessor];
-                Object.defineProperty(object, property, descriptor);
-            }
+        context.strategy.restore(context, this);
 
-            if (hasES5Support) {
-                descriptor = getPropertyDescriptor(object, property);
-                if (descriptor && descriptor.value === target) {
-                    object[property][accessor] = this.wrappedMethod;
-                }
-            } else {
-                // Use strict equality comparison to check failures then force a reset
-                // via direct assignment.
-                if (object[property][accessor] === target) {
-                    object[property][accessor] = this.wrappedMethod;
-                }
-            }
-        } else {
-            if (!owned) {
-                try {
-                    delete object[property];
-                } catch (e) {} // eslint-disable-line no-empty
-            } else if (hasES5Support) {
-                Object.defineProperty(object, property, wrappedMethodDesc);
-            }
-
-            if (hasES5Support) {
-                descriptor = getPropertyDescriptor(object, property);
-                if (descriptor && descriptor.value === target) {
-                    object[property] = this.wrappedMethod;
-                }
-            } else {
-                if (object[property] === target) {
-                    object[property] = this.wrappedMethod;
-                }
-            }
-        }
         if (sinonType.get(object) === "stub-instance") {
-            // this is simply to avoid errors after restoring if something should
-            // traverse the object in a cleanup phase, ref #2477
             object[property] = noop;
         }
     }
 
-    function extendObjectWithWrappedMethods() {
-        for (i = 0; i < wrappedMethods.length; i++) {
-            accessor = getAccessor(object, property, wrappedMethods[i]);
-            target = accessor ? method[accessor] : method;
-            extend.nonEnum(target, {
-                displayName: property,
-                wrappedMethod: wrappedMethods[i],
-
-                // Set up an Error object for a stack trace which can be used later to find what line of
-                // code the original method was created on.
-                stackTraceError: new Error("Stack Trace for original"),
-
-                restore: restore,
-            });
-
-            target.restore.sinon = true;
-            if (!hasES5Support) {
-                mirrorProperties(target, wrappedMethod);
-            }
-        }
-    }
-
-    extendObjectWithWrappedMethods();
+    attachRestoreMetadata(method, context.records, property, restore);
 
     return method;
 }

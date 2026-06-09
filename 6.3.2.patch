@@ -1,0 +1,1260 @@
+diff --git a/src/sinon/behavior.js b/src/sinon/behavior.js
+index b8cb081c..b4de6ad0 100644
+--- a/src/sinon/behavior.js
++++ b/src/sinon/behavior.js
+@@ -55,15 +55,11 @@ function getCallbackError(behavior, func, args) {
+         let msg;
+ 
+         if (behavior.callArgProp) {
+-            msg = `${functionName(
+-                behavior.stub,
+-            )} expected to yield to '${valueToString(
++            msg = `${functionName(behavior.stub)} expected to yield to '${valueToString(
+                 behavior.callArgProp,
+             )}', but no object with such a property was passed.`;
+         } else {
+-            msg = `${functionName(
+-                behavior.stub,
+-            )} expected to yield, but no callback was passed.`;
++            msg = `${functionName(behavior.stub)} expected to yield, but no callback was passed.`;
+         }
+ 
+         if (args.length > 0) {
+@@ -77,8 +73,6 @@ function getCallbackError(behavior, func, args) {
+ }
+ 
+ function ensureArgs(name, behavior, args) {
+-    // map function name to internal property
+-    //   callsArg => callArgAt
+     const property = name.replace(/sArg/, "ArgAt");
+     const index = behavior[property];
+ 
+@@ -118,22 +112,44 @@ function callCallback(behavior, args) {
+     return undefined;
+ }
+ 
+-const proto = {
+-    create: function create(stub) {
+-        const behavior = extend({}, proto);
+-        delete behavior.create;
+-        delete behavior.addBehavior;
+-        delete behavior.createBehavior;
+-        behavior.stub = stub;
++function createBehavior(behaviorMethod) {
++    return function () {
++        this.defaultBehavior = this.defaultBehavior || Behavior.create(this);
++        this.defaultBehavior[behaviorMethod].apply(
++            this.defaultBehavior,
++            arguments,
++        );
++        return this;
++    };
++}
++
++export default class Behavior {
++    constructor(stub) {
++        this.stub = stub;
+ 
+         if (stub.defaultBehavior && stub.defaultBehavior.promiseLibrary) {
+-            behavior.promiseLibrary = stub.defaultBehavior.promiseLibrary;
++            this.promiseLibrary = stub.defaultBehavior.promiseLibrary;
+         }
++    }
+ 
+-        return behavior;
+-    },
++    static create(stub) {
++        return new Behavior(stub);
++    }
++
++    static addBehavior(stub, name, fn) {
++        Behavior.prototype[name] = function () {
++            fn.apply(this, concat([this], slice(arguments)));
++            return this.stub || this;
++        };
++
++        stub[name] = createBehavior(name);
++    }
++
++    static createBehavior(behaviorMethod) {
++        return createBehavior(behaviorMethod);
++    }
+ 
+-    isPresent: function isPresent() {
++    isPresent() {
+         return (
+             typeof this.callArgAt === "number" ||
+             this.exception ||
+@@ -146,16 +162,9 @@ const proto = {
+             this.fakeFn ||
+             this.returnValueDefined
+         );
+-    },
+-
+-    /*eslint complexity: ["error", 20]*/
+-    invoke: function invoke(context, args) {
+-        /*
+-         * callCallback (conditionally) calls ensureArgs
+-         *
+-         * Note: callCallback intentionally happens before
+-         * everything else and cannot be moved lower
+-         */
++    }
++
++    invoke(context, args) {
+         const returnValue = callCallback(this, args);
+ 
+         if (this.exception) {
+@@ -190,11 +199,8 @@ const proto = {
+ 
+             return wrappedMethod.apply(context, args);
+         } else if (this.callsThroughWithNew) {
+-            // Get the original method (assumed to be a constructor in this case)
+             const WrappedClass = this.effectiveWrappedMethod();
+-            // Turn the arguments object into a normal array
+             const argsArray = slice(args);
+-            // Call the constructor
+             const F = WrappedClass.bind.apply(
+                 WrappedClass,
+                 concat([null], argsArray),
+@@ -207,65 +213,40 @@ const proto = {
+         }
+ 
+         return this.returnValue;
+-    },
++    }
+ 
+-    effectiveWrappedMethod: function effectiveWrappedMethod() {
++    effectiveWrappedMethod() {
+         for (let stubb = this.stub; stubb; stubb = stubb.parent) {
+             if (stubb.wrappedMethod) {
+                 return stubb.wrappedMethod;
+             }
+         }
+         throw new Error("Unable to find wrapped method");
+-    },
++    }
+ 
+-    onCall: function onCall(index) {
++    onCall(index) {
+         return this.stub.onCall(index);
+-    },
++    }
+ 
+-    onFirstCall: function onFirstCall() {
++    onFirstCall() {
+         return this.stub.onFirstCall();
+-    },
++    }
+ 
+-    onSecondCall: function onSecondCall() {
++    onSecondCall() {
+         return this.stub.onSecondCall();
+-    },
++    }
+ 
+-    onThirdCall: function onThirdCall() {
++    onThirdCall() {
+         return this.stub.onThirdCall();
+-    },
++    }
+ 
+-    withArgs: function withArgs(/* arguments */) {
++    withArgs() {
+         throw new Error(
+             'Defining a stub by invoking "stub.onCall(...).withArgs(...)" ' +
+                 'is not supported. Use "stub.withArgs(...).onCall(...)" ' +
+                 "to define sequential behavior for calls with certain arguments.",
+         );
+-    },
+-};
+-
+-function createBehavior(behaviorMethod) {
+-    return function () {
+-        this.defaultBehavior = this.defaultBehavior || proto.create(this);
+-        this.defaultBehavior[behaviorMethod].apply(
+-            this.defaultBehavior,
+-            arguments,
+-        );
+-        return this;
+-    };
+-}
+-
+-function addBehavior(stub, name, fn) {
+-    proto[name] = function () {
+-        fn.apply(this, concat([this], slice(arguments)));
+-        return this.stub || this;
+-    };
+-
+-    stub[name] = createBehavior(name);
++    }
+ }
+ 
+-proto.addBehavior = addBehavior;
+-proto.createBehavior = createBehavior;
+-
+-const asyncBehaviors = exportAsyncBehaviors(proto);
+-
+-export default extend.nonEnum({}, proto, asyncBehaviors);
++extend.nonEnum(Behavior.prototype, exportAsyncBehaviors(Behavior.prototype));
+diff --git a/src/sinon/proxy.js b/src/sinon/proxy.js
+index c61876ec..b7f749d5 100644
+--- a/src/sinon/proxy.js
++++ b/src/sinon/proxy.js
+@@ -6,19 +6,13 @@ import * as proxyCallUtil from "./proxy-call-util.js";
+ import proxyInvoke from "./proxy-invoke.js";
+ import { inspect } from "util";
+ import formatters from "./spy-formatters.js";
++import CallTracker from "./call-tracker.js";
+ 
+ const { prototypes } = commons;
+-const { push, forEach, slice } = prototypes.array;
+-
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
++const { push, slice } = prototypes.array;
+ 
+ const emptyFakes = [];
+ 
+-// Public API
+ const proxyApi = {
+     toString: functionToString,
+ 
+@@ -26,8 +20,6 @@ const proxyApi = {
+         this.displayName = name;
+         const nameDescriptor = Object.getOwnPropertyDescriptor(this, "name");
+         if (nameDescriptor && nameDescriptor.configurable) {
+-            // IE 11 functions don't have a name.
+-            // Safari 9 has names that are not configurable.
+             nameDescriptor.value = name;
+             Object.defineProperty(this, "name", nameDescriptor);
+         }
+@@ -36,18 +28,13 @@ const proxyApi = {
+ 
+     invoke: proxyInvoke,
+ 
+-    /*
+-     * Hook for derived implementation to return fake instances matching the
+-     * given arguments.
+-     */
+-    matchingFakes: function (/*args, strict*/) {
++    matchingFakes: function () {
+         return emptyFakes;
+     },
+ 
+     getCall: function getCall(index) {
+         let i = index;
+         if (i < 0) {
+-            // Negative indices means counting backwards from the last call
+             i += this.callCount;
+         }
+         if (i < 0 || i >= this.callCount) {
+@@ -138,41 +125,7 @@ const proxyApi = {
+     },
+ 
+     resetHistory: function () {
+-        if (this.invoking) {
+-            const err = new Error(
+-                "Cannot reset Sinon function while invoking it. " +
+-                    "Move the call to .resetHistory outside of the callback.",
+-            );
+-            err.name = "InvalidResetException";
+-            throw err;
+-        }
+-
+-        this.called = false;
+-        this.notCalled = true;
+-        this.calledOnce = false;
+-        this.calledTwice = false;
+-        this.calledThrice = false;
+-        this.callCount = 0;
+-        this.firstCall = null;
+-        this.secondCall = null;
+-        this.thirdCall = null;
+-        this.lastCall = null;
+-        this.lastArg = null;
+-        this.args = [];
+-        this.firstArg = null;
+-        this.returnValues = [];
+-        this.thisValues = [];
+-        this.exceptions = [];
+-        this.callIds = [];
+-        this.errorsWithCallStack = [];
+-
+-        if (this.fakes) {
+-            forEach(this.fakes, function (fake) {
+-                fake.resetHistory();
+-            });
+-        }
+-
+-        return this;
++        return this.callTracker.resetHistory();
+     },
+ };
+ 
+@@ -247,10 +200,7 @@ delegateToCalls(proxyApi, "alwaysCalledWithNew", false, "calledWithNew");
+ function wrapFunction(func, originalFunc) {
+     const arity = originalFunc.length;
+     let p;
+-    // Do not change this to use an eval. Projects that depend on sinon block the use of eval.
+-    // ref: https://github.com/sinonjs/sinon/issues/710
+     switch (arity) {
+-        /*eslint-disable no-unused-vars*/
+         case 0:
+             p = function proxy() {
+                 "use strict";
+@@ -335,58 +285,29 @@ function wrapFunction(func, originalFunc) {
+                 return p.invoke(func, this, slice(arguments));
+             };
+             break;
+-        /*eslint-enable*/
+     }
+     const nameDescriptor = Object.getOwnPropertyDescriptor(
+         originalFunc,
+         "name",
+     );
+     if (nameDescriptor && nameDescriptor.configurable) {
+-        // IE 11 functions don't have a name.
+-        // Safari 9 has names that are not configurable.
+         Object.defineProperty(p, "name", nameDescriptor);
+     }
+     extend.nonEnum(p, {
+         isSinonProxy: true,
+-
+-        called: false,
+-        notCalled: true,
+-        calledOnce: false,
+-        calledTwice: false,
+-        calledThrice: false,
+-        callCount: 0,
+-        firstCall: null,
+-        firstArg: null,
+-        secondCall: null,
+-        thirdCall: null,
+-        lastCall: null,
+-        lastArg: null,
+-        args: [],
+-        returnValues: [],
+-        thisValues: [],
+-        exceptions: [],
+-        callIds: [],
+-        errorsWithCallStack: [],
+     });
+     return p;
+ }
+ 
+-/**
+- * Creates a proxy function.
+- *
+- * @param {SinonFunction} func The original function
+- * @param {SinonFunction} originalFunc The original function (for arity and name)
+- * @returns {SinonFunction} The proxy function
+- */
+ export default function createProxy(func, originalFunc) {
+     const proxy = wrapFunction(func, originalFunc);
+ 
+-    // Inherit function properties:
+     extend(proxy, func);
+ 
+     proxy.prototype = func.prototype;
+ 
+     extend.nonEnum(proxy, proxyApi);
++    new CallTracker(proxy).attach(proxy);
+ 
+     return proxy;
+ }
+diff --git a/src/sinon/spy.js b/src/sinon/spy.js
+index 9c57ff50..0c621b09 100644
+--- a/src/sinon/spy.js
++++ b/src/sinon/spy.js
+@@ -1,133 +1,17 @@
+ import commons from "@sinonjs/commons";
+-import samsam from "@sinonjs/samsam";
+ import createProxy from "./proxy.js";
+ import extend from "./util/core/extend.js";
+ import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
+ import isEsModule from "./util/core/is-es-module.js";
+-import * as proxyCallUtil from "./proxy-call-util.js";
+ import walkObject from "./util/core/walk-object.js";
+ import wrapMethod from "./util/core/wrap-method.js";
++import { callTrackerApi } from "./call-tracker.js";
+ 
+-const { prototypes, functionName, valueToString } = commons;
+-const { deepEqual } = samsam;
+-const { forEach, pop, push, slice } = prototypes.array;
+-const filter = Array.prototype.filter;
+-
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
++const { functionName } = commons;
+ 
+ let uuid = 0;
+ 
+-function matches(fake, args, strict) {
+-    const margs = fake.matchingArguments;
+-    if (
+-        margs.length <= args.length &&
+-        deepEqual(slice(args, 0, margs.length), margs)
+-    ) {
+-        return !strict || margs.length === args.length;
+-    }
+-    return false;
+-}
+-
+-// Public API
+-const spyApi = {
+-    withArgs: function () {
+-        const args = slice(arguments);
+-        const matching = pop(this.matchingFakes(args, true));
+-        if (matching) {
+-            return matching;
+-        }
+-
+-        const original = this;
+-        const fakeInstance = this.instantiateFake();
+-        fakeInstance.matchingArguments = args;
+-        fakeInstance.parent = this;
+-        push(this.fakes, fakeInstance);
+-
+-        fakeInstance.withArgs = function () {
+-            return original.withArgs.apply(original, arguments);
+-        };
+-
+-        forEach(original.args, function (arg, i) {
+-            if (!matches(fakeInstance, arg)) {
+-                return;
+-            }
+-
+-            proxyCallUtil.incrementCallCount(fakeInstance);
+-            push(fakeInstance.thisValues, original.thisValues[i]);
+-            push(fakeInstance.args, arg);
+-            push(fakeInstance.returnValues, original.returnValues[i]);
+-            push(fakeInstance.exceptions, original.exceptions[i]);
+-            push(fakeInstance.callIds, original.callIds[i]);
+-        });
+-
+-        proxyCallUtil.createCallProperties(fakeInstance);
+-
+-        return fakeInstance;
+-    },
+-
+-    // Override proxy default implementation
+-    matchingFakes: function (args, strict) {
+-        return filter.call(this.fakes, function (fakeInstance) {
+-            return matches(fakeInstance, args, strict);
+-        });
+-    },
+-};
+-
+-const delegateToCalls = proxyCallUtil.delegateToCalls;
+-delegateToCalls(spyApi, "callArg", false, "callArgWith", true, function () {
+-    throw new Error(
+-        `${this.toString()} cannot call arg since it was not yet invoked.`,
+-    );
+-});
+-spyApi.callArgWith = spyApi.callArg;
+-delegateToCalls(spyApi, "callArgOn", false, "callArgOnWith", true, function () {
+-    throw new Error(
+-        `${this.toString()} cannot call arg since it was not yet invoked.`,
+-    );
+-});
+-spyApi.callArgOnWith = spyApi.callArgOn;
+-delegateToCalls(spyApi, "throwArg", false, "throwArg", false, function () {
+-    throw new Error(
+-        `${this.toString()} cannot throw arg since it was not yet invoked.`,
+-    );
+-});
+-delegateToCalls(spyApi, "yield", false, "yield", true, function () {
+-    throw new Error(
+-        `${this.toString()} cannot yield since it was not yet invoked.`,
+-    );
+-});
+-// "invokeCallback" is an alias for "yield" since "yield" is invalid in strict mode.
+-spyApi.invokeCallback = spyApi.yield;
+-delegateToCalls(spyApi, "yieldOn", false, "yieldOn", true, function () {
+-    throw new Error(
+-        `${this.toString()} cannot yield since it was not yet invoked.`,
+-    );
+-});
+-delegateToCalls(spyApi, "yieldTo", false, "yieldTo", true, function (property) {
+-    throw new Error(
+-        `${this.toString()} cannot yield to '${valueToString(
+-            property,
+-        )}' since it was not yet invoked.`,
+-    );
+-});
+-delegateToCalls(
+-    spyApi,
+-    "yieldToOn",
+-    false,
+-    "yieldToOn",
+-    true,
+-    function (property) {
+-        throw new Error(
+-            `${this.toString()} cannot yield to '${valueToString(
+-                property,
+-            )}' since it was not yet invoked.`,
+-        );
+-    },
+-);
++const spyApi = extend({}, callTrackerApi);
+ 
+ function createSpy(func) {
+     let name;
+@@ -143,25 +27,15 @@ function createSpy(func) {
+ 
+     const proxy = createProxy(funk, funk);
+ 
+-    // Inherit spy API:
+     extend.nonEnum(proxy, spyApi);
+     extend.nonEnum(proxy, {
+         displayName: name || "spy",
+-        fakes: [],
+         instantiateFake: createSpy,
+         id: `spy#${uuid++}`,
+     });
+     return proxy;
+ }
+ 
+-/**
+- * Creates a spy.
+- *
+- * @param {object|SinonFunction} [object] The object or function to spy on
+- * @param {string} [property] The property name to spy on
+- * @param {Array} [types] Types of accessor to spy on (get, set)
+- * @returns {SinonFunction|object} The spy or an object with spied accessors
+- */
+ export default function spy(object, property, types) {
+     if (isEsModule(object)) {
+         throw new TypeError("ES Modules cannot be spied");
+@@ -188,9 +62,9 @@ export default function spy(object, property, types) {
+     const descriptor = {};
+     const methodDesc = getPropertyDescriptor(object, property);
+ 
+-    forEach(types, function (type) {
++    for (const type of types) {
+         descriptor[type] = createSpy(methodDesc[type]);
+-    });
++    }
+ 
+     return wrapMethod(object, property, descriptor);
+ }
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..3adf2b14 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -1,9 +1,8 @@
+ import commons from "@sinonjs/commons";
+-import behavior from "./behavior.js";
++import Behavior from "./behavior.js";
+ import behaviors from "./default-behaviors.js";
+ import createProxy from "./proxy.js";
+ import isNonExistentProperty from "./util/core/is-non-existent-property.js";
+-import spy from "./spy.js";
+ import extend from "./util/core/extend.js";
+ import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
+ import isEsModule from "./util/core/is-es-module.js";
+@@ -11,6 +10,7 @@ import sinonType from "./util/core/sinon-type.js";
+ import wrapMethod from "./util/core/wrap-method.js";
+ import throwOnFalsyObject from "./throw-on-falsy-object.js";
+ import walkObject from "./util/core/walk-object.js";
++import { callTrackerApi } from "./call-tracker.js";
+ 
+ const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
+ const { array: arrayProto, object: objectProto } = commonsPrototypes;
+@@ -23,8 +23,26 @@ const sort = arrayProto.sort;
+ 
+ let uuid = 0;
+ 
++function getParentBehaviour(stubInstance) {
++    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
++}
++
++function getDefaultBehavior(stubInstance) {
++    return (
++        stubInstance.defaultBehavior ||
++        getParentBehaviour(stubInstance) ||
++        Behavior.create(stubInstance)
++    );
++}
++
++function getCurrentBehavior(stubInstance) {
++    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
++    return currentBehavior && currentBehavior.isPresent()
++        ? currentBehavior
++        : getDefaultBehavior(stubInstance);
++}
++
+ function createStub(originalFunc) {
+-    // eslint-disable-next-line prefer-const
+     let proxy;
+ 
+     function functionStub() {
+@@ -43,14 +61,11 @@ function createStub(originalFunc) {
+     }
+ 
+     proxy = createProxy(functionStub, originalFunc || functionStub);
+-    // Inherit spy API:
+-    extend.nonEnum(proxy, spy);
+-    // Inherit stub API:
+-    extend.nonEnum(proxy, stub);
++    extend.nonEnum(proxy, callTrackerApi);
++    extend.nonEnum(proxy, stubApi);
+ 
+     const name = originalFunc ? functionName(originalFunc) : null;
+     extend.nonEnum(proxy, {
+-        fakes: [],
+         instantiateFake: createStub,
+         displayName: name || "stub",
+         defaultBehavior: null,
+@@ -160,26 +175,7 @@ function isDataDescriptor(descriptor) {
+     );
+ }
+ 
+-function getParentBehaviour(stubInstance) {
+-    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
+-}
+-
+-function getDefaultBehavior(stubInstance) {
+-    return (
+-        stubInstance.defaultBehavior ||
+-        getParentBehaviour(stubInstance) ||
+-        behavior.create(stubInstance)
+-    );
+-}
+-
+-function getCurrentBehavior(stubInstance) {
+-    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
+-    return currentBehavior && currentBehavior.isPresent()
+-        ? currentBehavior
+-        : getDefaultBehavior(stubInstance);
+-}
+-
+-const proto = {
++const stubApi = {
+     resetBehavior: function () {
+         this.defaultBehavior = null;
+         this.behaviors = [];
+@@ -204,7 +200,7 @@ const proto = {
+ 
+     onCall: function onCall(index) {
+         if (!this.behaviors[index]) {
+-            this.behaviors[index] = behavior.create(this);
++            this.behaviors[index] = Behavior.create(this);
+         }
+ 
+         return this.behaviors[index];
+@@ -223,32 +219,21 @@ const proto = {
+     },
+ 
+     withArgs: function withArgs() {
+-        const fake = spy.withArgs.apply(this, arguments);
+-        if (this.defaultBehavior && this.defaultBehavior.promiseLibrary) {
+-            fake.defaultBehavior =
+-                fake.defaultBehavior || behavior.create(fake);
++        const host = this.callTracker.withArgsHost || this;
++        const fake = callTrackerApi.withArgs.apply(this, arguments);
++        if (host.defaultBehavior && host.defaultBehavior.promiseLibrary) {
++            fake.defaultBehavior = fake.defaultBehavior || Behavior.create(fake);
+             fake.defaultBehavior.promiseLibrary =
+-                this.defaultBehavior.promiseLibrary;
++                host.defaultBehavior.promiseLibrary;
+         }
+         return fake;
+     },
+ };
+ 
+-forEach(Object.keys(behavior), function (method) {
+-    if (
+-        hasOwnProperty(behavior, method) &&
+-        !hasOwnProperty(proto, method) &&
+-        method !== "create" &&
+-        method !== "invoke"
+-    ) {
+-        proto[method] = behavior.createBehavior(method);
+-    }
+-});
+-
+ forEach(Object.keys(behaviors), function (method) {
+-    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(proto, method)) {
+-        behavior.addBehavior(stub, method, behaviors[method]);
++    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(stubApi, method)) {
++        Behavior.addBehavior(stub, method, behaviors[method]);
+     }
+ });
+ 
+-extend(stub, proto);
++extend(stub, stubApi);
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..040caafc 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -8,13 +8,6 @@ import sinonType from "./sinon-type.js";
+ const { hasOwnProperty } = prototypes.object;
+ const { push } = prototypes.array;
+ 
+-/**
+- * @callback SinonFunction
+- * @param {...unknown} args
+- * @returns {unknown}
+- */
+-
+-// eslint-disable-next-line no-empty-function
+ const noop = () => {};
+ 
+ function isFunction(obj) {
+@@ -25,6 +18,10 @@ function isFunction(obj) {
+ }
+ 
+ function mirrorProperties(target, source) {
++    if (!source || typeof target !== "function") {
++        return;
++    }
++
+     for (const prop in source) {
+         if (!hasOwnProperty(target, prop)) {
+             target[prop] = source[prop];
+@@ -32,229 +29,359 @@ function mirrorProperties(target, source) {
+     }
+ }
+ 
+-function getAccessor(object, property, method) {
+-    const accessors = ["get", "set"];
+-    const descriptor = getPropertyDescriptor(object, property);
++function checkWrappedMethod(wrappedMethod, property) {
++    let error;
++
++    if (!isFunction(wrappedMethod)) {
++        error = new TypeError(
++            `Attempted to wrap ${typeof wrappedMethod} property ${valueToString(
++                property,
++            )} as function`,
++        );
++    } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
++        error = new TypeError(
++            `Attempted to wrap ${valueToString(
++                property,
++            )} which is already wrapped`,
++        );
++    } else if (wrappedMethod.calledBefore) {
++        const verb = wrappedMethod.returns ? "stubbed" : "spied on";
++        error = new TypeError(
++            `Attempted to wrap ${valueToString(
++                property,
++            )} which is already ${verb}`,
++        );
++    }
+ 
+-    for (let i = 0; i < accessors.length; i++) {
+-        if (
+-            descriptor[accessors[i]] &&
+-            descriptor[accessors[i]].name === method.name
+-        ) {
+-            return accessors[i];
++    if (error) {
++        if (wrappedMethod && wrappedMethod.stackTraceError) {
++            error.stack += `\n--------------\n${wrappedMethod.stackTraceError.stack}`;
+         }
++        throw error;
+     }
+-    return null;
+ }
+ 
+-// Cheap way to detect if we have ES5 support.
+-const hasES5Support = "keys" in Object;
+-
+-/**
+- * Wraps a method on an object with another function.
+- *
+- * @param {object} object The object containing the method
+- * @param {string | symbol} property The property name of the method to wrap
+- * @param {SinonFunction|object} method The wrapper function or a property descriptor
+- * @returns {SinonFunction} The wrapped method
+- */
+-export default function wrapMethod(object, property, method) {
+-    if (!object) {
+-        throw new TypeError("Should wrap property of object");
++function toPropertyDescriptor(descriptor) {
++    if (!descriptor) {
++        return descriptor;
+     }
+ 
+-    if (typeof method !== "function" && typeof method !== "object") {
+-        throw new TypeError(
+-            "Method wrapper should be a function or a property descriptor",
+-        );
++    const copy = {};
++    const keys = [
++        "configurable",
++        "enumerable",
++        "writable",
++        "value",
++        "get",
++        "set",
++    ];
++
++    for (const key of keys) {
++        if (Object.prototype.hasOwnProperty.call(descriptor, key)) {
++            copy[key] = descriptor[key];
++        }
+     }
+ 
+-    function checkWrappedMethod(wrappedMethod) {
+-        let error;
++    return copy;
++}
+ 
+-        if (!isFunction(wrappedMethod)) {
+-            error = new TypeError(
+-                `Attempted to wrap ${typeof wrappedMethod} property ${valueToString(
+-                    property,
+-                )} as function`,
+-            );
+-        } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
+-            error = new TypeError(
+-                `Attempted to wrap ${valueToString(
+-                    property,
+-                )} which is already wrapped`,
+-            );
+-        } else if (wrappedMethod.calledBefore) {
+-            const verb = wrappedMethod.returns ? "stubbed" : "spied on";
+-            error = new TypeError(
+-                `Attempted to wrap ${valueToString(
+-                    property,
+-                )} which is already ${verb}`,
+-            );
+-        }
++function getMethodDescriptor(method) {
++    return typeof method === "function" ? { value: method } : method;
++}
+ 
+-        if (error) {
+-            if (wrappedMethod && wrappedMethod.stackTraceError) {
+-                error.stack += `\n--------------\n${wrappedMethod.stackTraceError.stack}`;
+-            }
+-            throw error;
+-        }
++function isAccessorDescriptor(descriptor) {
++    return descriptor && ("get" in descriptor || "set" in descriptor);
++}
++
++function getReplacementKeys(methodDescriptor) {
++    if (isAccessorDescriptor(methodDescriptor)) {
++        return ["get", "set"].filter(function (key) {
++            return typeof methodDescriptor[key] === "function";
++        });
+     }
+ 
+-    let error, wrappedMethod, i, wrappedMethodDesc, target, accessor;
++    return ["value"];
++}
+ 
+-    const wrappedMethods = [];
++function composeReplacementDescriptor(originalDescriptor, methodDescriptor, owned) {
++    const descriptor = toPropertyDescriptor(originalDescriptor) || {};
+ 
+-    function simplePropertyAssignment() {
+-        wrappedMethod = object[property];
+-        checkWrappedMethod(wrappedMethod);
+-        object[property] = method;
+-        method.displayName = property;
++    for (const key of Object.keys(methodDescriptor)) {
++        descriptor[key] = methodDescriptor[key];
+     }
+ 
+-    // Firefox has a problem when using hasOwn.call on objects from other frames.
+-    const owned = object.hasOwnProperty
+-        ? object.hasOwnProperty(property)
+-        : hasOwnProperty(object, property);
++    if (isAccessorDescriptor(methodDescriptor)) {
++        delete descriptor.value;
++        delete descriptor.writable;
++    } else {
++        delete descriptor.get;
++        delete descriptor.set;
++    }
+ 
+-    if (hasES5Support) {
+-        const methodDesc =
+-            typeof method === "function" ? { value: method } : method;
+-        wrappedMethodDesc = getPropertyDescriptor(object, property);
++    if (!owned) {
++        descriptor.configurable = true;
++    }
+ 
+-        if (!wrappedMethodDesc) {
+-            error = new TypeError(
+-                `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
+-            );
+-        } else if (
+-            wrappedMethodDesc.restore &&
+-            wrappedMethodDesc.restore.sinon
+-        ) {
+-            error = new TypeError(
+-                `Attempted to wrap ${property} which is already wrapped`,
+-            );
+-        }
+-        if (error) {
+-            if (wrappedMethodDesc && wrappedMethodDesc.stackTraceError) {
+-                error.stack += `\n--------------\n${wrappedMethodDesc.stackTraceError.stack}`;
+-            }
+-            throw error;
+-        }
++    return descriptor;
++}
+ 
+-        const types = Object.keys(methodDesc);
+-        for (i = 0; i < types.length; i++) {
+-            wrappedMethod = wrappedMethodDesc[types[i]];
+-            checkWrappedMethod(wrappedMethod);
+-            push(wrappedMethods, wrappedMethod);
+-        }
++function getWrappedMethodRecords(originalDescriptor, methodDescriptor, property) {
++    const records = [];
++
++    for (const key of getReplacementKeys(methodDescriptor)) {
++        const wrappedMethod = originalDescriptor[key];
++        checkWrappedMethod(wrappedMethod, property);
++        push(records, {
++            accessor: key === "value" ? null : key,
++            wrappedMethod: wrappedMethod,
++            target: key === "value" ? methodDescriptor.value : methodDescriptor[key],
++        });
++    }
+ 
+-        mirrorProperties(methodDesc, wrappedMethodDesc);
+-        for (i = 0; i < types.length; i++) {
+-            mirrorProperties(methodDesc[types[i]], wrappedMethodDesc[types[i]]);
+-        }
++    return records;
++}
+ 
+-        // you are not allowed to flip the configurable prop on an
+-        // existing descriptor to anything but false (#2514)
+-        if (!owned) {
+-            methodDesc.configurable = true;
+-        }
++function attachRestoreMetadata(method, records, property, restore) {
++    for (const record of records) {
++        extend.nonEnum(record.target, {
++            displayName: property,
++            wrappedMethod: record.wrappedMethod,
++            stackTraceError: new Error("Stack Trace for original"),
++            restore: restore,
++        });
+ 
+-        Object.defineProperty(object, property, methodDesc);
++        record.target.restore.sinon = true;
++    }
+ 
+-        // catch failing assignment
+-        // this is the converse of the check in `.restore` below
+-        if (typeof method === "function" && object[property] !== method) {
+-            // correct any wrongdoings caused by the defineProperty call above,
+-            // such as adding new items (if object was a Storage object)
+-            delete object[property];
+-            simplePropertyAssignment();
++    if (typeof method === "object") {
++        const target = records[0] && records[0].target;
++        if (target && target.restore) {
++            extend.nonEnum(method, {
++                restore: target.restore,
++            });
+         }
+-    } else {
+-        simplePropertyAssignment();
+     }
++}
+ 
+-    function restore() {
+-        accessor = getAccessor(object, property, this.wrappedMethod);
+-        let descriptor;
+-        // For prototype properties try to reset by delete first.
+-        // If this fails (ex: localStorage on mobile safari) then force a reset
+-        // via direct assignment.
+-        if (accessor) {
+-            if (!owned) {
++const hasES5Support = "keys" in Object;
++
++const replacementStrategies = {
++    assignment: {
++        match: function () {
++            return !hasES5Support;
++        },
++        apply: function (context) {
++            const wrappedMethod = context.object[context.property];
++            checkWrappedMethod(wrappedMethod, context.property);
++            context.object[context.property] = context.method;
++            context.method.displayName = context.property;
++            context.records = [
++                {
++                    accessor: null,
++                    wrappedMethod: wrappedMethod,
++                    target: context.method,
++                },
++            ];
++        },
++        restore: function (context, target) {
++            if (!context.owned) {
+                 try {
+-                    // In some cases `delete` may throw an error
+-                    delete object[property][accessor];
+-                } catch (e) {} // eslint-disable-line no-empty
+-                // For native code functions `delete` fails without throwing an error
+-                // on Chrome < 43, PhantomJS, etc.
+-            } else if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                descriptor[accessor] = wrappedMethodDesc[accessor];
+-                Object.defineProperty(object, property, descriptor);
++                    delete context.object[context.property];
++                } catch (e) {}
+             }
+ 
+-            if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                if (descriptor && descriptor.value === target) {
+-                    object[property][accessor] = this.wrappedMethod;
+-                }
+-            } else {
+-                // Use strict equality comparison to check failures then force a reset
+-                // via direct assignment.
+-                if (object[property][accessor] === target) {
+-                    object[property][accessor] = this.wrappedMethod;
+-                }
++            if (context.object[context.property] === target) {
++                context.object[context.property] = context.originalDescriptor.value;
+             }
+-        } else {
+-            if (!owned) {
+-                try {
+-                    delete object[property];
+-                } catch (e) {} // eslint-disable-line no-empty
+-            } else if (hasES5Support) {
+-                Object.defineProperty(object, property, wrappedMethodDesc);
++        },
++    },
++    accessorDescriptor: {
++        match: function (context) {
++            return isAccessorDescriptor(context.methodDescriptor);
++        },
++        apply: function (context) {
++            context.records = getWrappedMethodRecords(
++                context.originalDescriptor,
++                context.methodDescriptor,
++                context.property,
++            );
++
++            for (const record of context.records) {
++                mirrorProperties(record.target, record.wrappedMethod);
++            }
++
++            context.appliedDescriptor = composeReplacementDescriptor(
++                context.originalDescriptor,
++                context.methodDescriptor,
++                context.owned,
++            );
++
++            Object.defineProperty(
++                context.object,
++                context.property,
++                context.appliedDescriptor,
++            );
++        },
++        restore: function (context) {
++            if (context.owned) {
++                Object.defineProperty(
++                    context.object,
++                    context.property,
++                    toPropertyDescriptor(context.originalDescriptor),
++                );
++                return;
+             }
+ 
+-            if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                if (descriptor && descriptor.value === target) {
+-                    object[property] = this.wrappedMethod;
+-                }
++            try {
++                delete context.object[context.property];
++            } catch (e) {}
++
++            if (Object.getOwnPropertyDescriptor(context.object, context.property)) {
++                Object.defineProperty(
++                    context.object,
++                    context.property,
++                    toPropertyDescriptor(context.originalDescriptor),
++                );
++            }
++        },
++    },
++    dataDescriptor: {
++        match: function () {
++            return true;
++        },
++        apply: function (context) {
++            context.records = getWrappedMethodRecords(
++                context.originalDescriptor,
++                context.methodDescriptor,
++                context.property,
++            );
++            const wrappedMethod = context.records[0].wrappedMethod;
++
++            mirrorProperties(context.methodDescriptor.value, wrappedMethod);
++
++            context.appliedDescriptor = composeReplacementDescriptor(
++                context.originalDescriptor,
++                context.methodDescriptor,
++                context.owned,
++            );
++
++            Object.defineProperty(
++                context.object,
++                context.property,
++                context.appliedDescriptor,
++            );
++
++            if (
++                typeof context.method === "function" &&
++                context.object[context.property] !== context.method
++            ) {
++                delete context.object[context.property];
++                replacementStrategies.assignment.apply(context);
++                context.strategy = replacementStrategies.assignment;
++            }
++        },
++        restore: function (context, target) {
++            if (context.owned) {
++                Object.defineProperty(
++                    context.object,
++                    context.property,
++                    toPropertyDescriptor(context.originalDescriptor),
++                );
+             } else {
+-                if (object[property] === target) {
+-                    object[property] = this.wrappedMethod;
+-                }
++                try {
++                    delete context.object[context.property];
++                } catch (e) {}
+             }
++
++            const descriptor = getPropertyDescriptor(context.object, context.property);
++            if (descriptor && descriptor.value === target) {
++                context.object[context.property] = context.originalDescriptor.value;
++            }
++        },
++    },
++};
++
++function getReplacementStrategy(context) {
++    if (!context.originalDescriptor) {
++        throw new TypeError(
++            `Attempted to wrap ${typeof context.object[context.property]} property ${valueToString(
++                context.property,
++            )} as function`,
++        );
++    }
++
++    if (
++        context.originalDescriptor.restore &&
++        context.originalDescriptor.restore.sinon
++    ) {
++        const error = new TypeError(
++            `Attempted to wrap ${valueToString(
++                context.property,
++            )} which is already wrapped`,
++        );
++        if (context.originalDescriptor.stackTraceError) {
++            error.stack +=
++                `\n--------------\n${context.originalDescriptor.stackTraceError.stack}`;
+         }
+-        if (sinonType.get(object) === "stub-instance") {
+-            // this is simply to avoid errors after restoring if something should
+-            // traverse the object in a cleanup phase, ref #2477
+-            object[property] = noop;
++        throw error;
++    }
++
++    const strategies = [
++        replacementStrategies.assignment,
++        replacementStrategies.accessorDescriptor,
++        replacementStrategies.dataDescriptor,
++    ];
++
++    for (const strategy of strategies) {
++        if (strategy.match(context)) {
++            return strategy;
+         }
+     }
+ 
+-    function extendObjectWithWrappedMethods() {
+-        for (i = 0; i < wrappedMethods.length; i++) {
+-            accessor = getAccessor(object, property, wrappedMethods[i]);
+-            target = accessor ? method[accessor] : method;
+-            extend.nonEnum(target, {
+-                displayName: property,
+-                wrappedMethod: wrappedMethods[i],
++    return replacementStrategies.dataDescriptor;
++}
+ 
+-                // Set up an Error object for a stack trace which can be used later to find what line of
+-                // code the original method was created on.
+-                stackTraceError: new Error("Stack Trace for original"),
++export default function wrapMethod(object, property, method) {
++    if (!object) {
++        throw new TypeError("Should wrap property of object");
++    }
+ 
+-                restore: restore,
+-            });
++    if (typeof method !== "function" && typeof method !== "object") {
++        throw new TypeError(
++            "Method wrapper should be a function or a property descriptor",
++        );
++    }
+ 
+-            target.restore.sinon = true;
+-            if (!hasES5Support) {
+-                mirrorProperties(target, wrappedMethod);
+-            }
++    const owned = object.hasOwnProperty
++        ? object.hasOwnProperty(property)
++        : hasOwnProperty(object, property);
++    const methodDescriptor = getMethodDescriptor(method);
++    const originalDescriptor = hasES5Support
++        ? getPropertyDescriptor(object, property)
++        : { value: object[property] };
++    const context = {
++        object: object,
++        property: property,
++        method: method,
++        methodDescriptor: methodDescriptor,
++        originalDescriptor: originalDescriptor,
++        owned: owned,
++        records: [],
++    };
++    const strategy = getReplacementStrategy(context);
++    context.strategy = strategy;
++
++    strategy.apply(context);
++
++    function restore() {
++        context.strategy.restore(context, this);
++
++        if (sinonType.get(object) === "stub-instance") {
++            object[property] = noop;
+         }
+     }
+ 
+-    extendObjectWithWrappedMethods();
++    attachRestoreMetadata(method, context.records, property, restore);
+ 
+     return method;
+ }

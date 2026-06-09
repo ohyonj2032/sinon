@@ -6,19 +6,13 @@ import * as proxyCallUtil from "./proxy-call-util.js";
 import proxyInvoke from "./proxy-invoke.js";
 import { inspect } from "util";
 import formatters from "./spy-formatters.js";
+import CallTracker from "./call-tracker.js";
 
 const { prototypes } = commons;
-const { push, forEach, slice } = prototypes.array;
-
-/**
- * @callback SinonFunction
- * @param {...unknown} args
- * @returns {unknown}
- */
+const { push, slice } = prototypes.array;
 
 const emptyFakes = [];
 
-// Public API
 const proxyApi = {
     toString: functionToString,
 
@@ -26,8 +20,6 @@ const proxyApi = {
         this.displayName = name;
         const nameDescriptor = Object.getOwnPropertyDescriptor(this, "name");
         if (nameDescriptor && nameDescriptor.configurable) {
-            // IE 11 functions don't have a name.
-            // Safari 9 has names that are not configurable.
             nameDescriptor.value = name;
             Object.defineProperty(this, "name", nameDescriptor);
         }
@@ -36,18 +28,13 @@ const proxyApi = {
 
     invoke: proxyInvoke,
 
-    /*
-     * Hook for derived implementation to return fake instances matching the
-     * given arguments.
-     */
-    matchingFakes: function (/*args, strict*/) {
+    matchingFakes: function () {
         return emptyFakes;
     },
 
     getCall: function getCall(index) {
         let i = index;
         if (i < 0) {
-            // Negative indices means counting backwards from the last call
             i += this.callCount;
         }
         if (i < 0 || i >= this.callCount) {
@@ -138,41 +125,7 @@ const proxyApi = {
     },
 
     resetHistory: function () {
-        if (this.invoking) {
-            const err = new Error(
-                "Cannot reset Sinon function while invoking it. " +
-                    "Move the call to .resetHistory outside of the callback.",
-            );
-            err.name = "InvalidResetException";
-            throw err;
-        }
-
-        this.called = false;
-        this.notCalled = true;
-        this.calledOnce = false;
-        this.calledTwice = false;
-        this.calledThrice = false;
-        this.callCount = 0;
-        this.firstCall = null;
-        this.secondCall = null;
-        this.thirdCall = null;
-        this.lastCall = null;
-        this.lastArg = null;
-        this.args = [];
-        this.firstArg = null;
-        this.returnValues = [];
-        this.thisValues = [];
-        this.exceptions = [];
-        this.callIds = [];
-        this.errorsWithCallStack = [];
-
-        if (this.fakes) {
-            forEach(this.fakes, function (fake) {
-                fake.resetHistory();
-            });
-        }
-
-        return this;
+        return this.callTracker.resetHistory();
     },
 };
 
@@ -247,10 +200,7 @@ delegateToCalls(proxyApi, "alwaysCalledWithNew", false, "calledWithNew");
 function wrapFunction(func, originalFunc) {
     const arity = originalFunc.length;
     let p;
-    // Do not change this to use an eval. Projects that depend on sinon block the use of eval.
-    // ref: https://github.com/sinonjs/sinon/issues/710
     switch (arity) {
-        /*eslint-disable no-unused-vars*/
         case 0:
             p = function proxy() {
                 "use strict";
@@ -335,58 +285,29 @@ function wrapFunction(func, originalFunc) {
                 return p.invoke(func, this, slice(arguments));
             };
             break;
-        /*eslint-enable*/
     }
     const nameDescriptor = Object.getOwnPropertyDescriptor(
         originalFunc,
         "name",
     );
     if (nameDescriptor && nameDescriptor.configurable) {
-        // IE 11 functions don't have a name.
-        // Safari 9 has names that are not configurable.
         Object.defineProperty(p, "name", nameDescriptor);
     }
     extend.nonEnum(p, {
         isSinonProxy: true,
-
-        called: false,
-        notCalled: true,
-        calledOnce: false,
-        calledTwice: false,
-        calledThrice: false,
-        callCount: 0,
-        firstCall: null,
-        firstArg: null,
-        secondCall: null,
-        thirdCall: null,
-        lastCall: null,
-        lastArg: null,
-        args: [],
-        returnValues: [],
-        thisValues: [],
-        exceptions: [],
-        callIds: [],
-        errorsWithCallStack: [],
     });
     return p;
 }
 
-/**
- * Creates a proxy function.
- *
- * @param {SinonFunction} func The original function
- * @param {SinonFunction} originalFunc The original function (for arity and name)
- * @returns {SinonFunction} The proxy function
- */
 export default function createProxy(func, originalFunc) {
     const proxy = wrapFunction(func, originalFunc);
 
-    // Inherit function properties:
     extend(proxy, func);
 
     proxy.prototype = func.prototype;
 
     extend.nonEnum(proxy, proxyApi);
+    new CallTracker(proxy).attach(proxy);
 
     return proxy;
 }

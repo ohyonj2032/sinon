@@ -1,9 +1,8 @@
 import commons from "@sinonjs/commons";
-import behavior from "./behavior.js";
+import Behavior from "./behavior.js";
 import behaviors from "./default-behaviors.js";
 import createProxy from "./proxy.js";
 import isNonExistentProperty from "./util/core/is-non-existent-property.js";
-import spy from "./spy.js";
 import extend from "./util/core/extend.js";
 import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
 import isEsModule from "./util/core/is-es-module.js";
@@ -11,6 +10,7 @@ import sinonType from "./util/core/sinon-type.js";
 import wrapMethod from "./util/core/wrap-method.js";
 import throwOnFalsyObject from "./throw-on-falsy-object.js";
 import walkObject from "./util/core/walk-object.js";
+import { callTrackerApi } from "./call-tracker.js";
 
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto, object: objectProto } = commonsPrototypes;
@@ -23,8 +23,26 @@ const sort = arrayProto.sort;
 
 let uuid = 0;
 
+function getParentBehaviour(stubInstance) {
+    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
+}
+
+function getDefaultBehavior(stubInstance) {
+    return (
+        stubInstance.defaultBehavior ||
+        getParentBehaviour(stubInstance) ||
+        Behavior.create(stubInstance)
+    );
+}
+
+function getCurrentBehavior(stubInstance) {
+    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
+    return currentBehavior && currentBehavior.isPresent()
+        ? currentBehavior
+        : getDefaultBehavior(stubInstance);
+}
+
 function createStub(originalFunc) {
-    // eslint-disable-next-line prefer-const
     let proxy;
 
     function functionStub() {
@@ -43,14 +61,11 @@ function createStub(originalFunc) {
     }
 
     proxy = createProxy(functionStub, originalFunc || functionStub);
-    // Inherit spy API:
-    extend.nonEnum(proxy, spy);
-    // Inherit stub API:
-    extend.nonEnum(proxy, stub);
+    extend.nonEnum(proxy, callTrackerApi);
+    extend.nonEnum(proxy, stubApi);
 
     const name = originalFunc ? functionName(originalFunc) : null;
     extend.nonEnum(proxy, {
-        fakes: [],
         instantiateFake: createStub,
         displayName: name || "stub",
         defaultBehavior: null,
@@ -160,26 +175,7 @@ function isDataDescriptor(descriptor) {
     );
 }
 
-function getParentBehaviour(stubInstance) {
-    return stubInstance.parent && getCurrentBehavior(stubInstance.parent);
-}
-
-function getDefaultBehavior(stubInstance) {
-    return (
-        stubInstance.defaultBehavior ||
-        getParentBehaviour(stubInstance) ||
-        behavior.create(stubInstance)
-    );
-}
-
-function getCurrentBehavior(stubInstance) {
-    const currentBehavior = stubInstance.behaviors[stubInstance.callCount - 1];
-    return currentBehavior && currentBehavior.isPresent()
-        ? currentBehavior
-        : getDefaultBehavior(stubInstance);
-}
-
-const proto = {
+const stubApi = {
     resetBehavior: function () {
         this.defaultBehavior = null;
         this.behaviors = [];
@@ -204,7 +200,7 @@ const proto = {
 
     onCall: function onCall(index) {
         if (!this.behaviors[index]) {
-            this.behaviors[index] = behavior.create(this);
+            this.behaviors[index] = Behavior.create(this);
         }
 
         return this.behaviors[index];
@@ -223,32 +219,21 @@ const proto = {
     },
 
     withArgs: function withArgs() {
-        const fake = spy.withArgs.apply(this, arguments);
-        if (this.defaultBehavior && this.defaultBehavior.promiseLibrary) {
-            fake.defaultBehavior =
-                fake.defaultBehavior || behavior.create(fake);
+        const host = this.callTracker.withArgsHost || this;
+        const fake = callTrackerApi.withArgs.apply(this, arguments);
+        if (host.defaultBehavior && host.defaultBehavior.promiseLibrary) {
+            fake.defaultBehavior = fake.defaultBehavior || Behavior.create(fake);
             fake.defaultBehavior.promiseLibrary =
-                this.defaultBehavior.promiseLibrary;
+                host.defaultBehavior.promiseLibrary;
         }
         return fake;
     },
 };
 
-forEach(Object.keys(behavior), function (method) {
-    if (
-        hasOwnProperty(behavior, method) &&
-        !hasOwnProperty(proto, method) &&
-        method !== "create" &&
-        method !== "invoke"
-    ) {
-        proto[method] = behavior.createBehavior(method);
-    }
-});
-
 forEach(Object.keys(behaviors), function (method) {
-    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(proto, method)) {
-        behavior.addBehavior(stub, method, behaviors[method]);
+    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(stubApi, method)) {
+        Behavior.addBehavior(stub, method, behaviors[method]);
     }
 });
 
-extend(stub, proto);
+extend(stub, stubApi);
