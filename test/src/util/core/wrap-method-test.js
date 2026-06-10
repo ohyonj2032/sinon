@@ -223,20 +223,19 @@ describe("util/core/wrapMethod", function () {
         );
     });
 
-    it("throws if method is already a spy", function () {
+    it("allows wrapping over a spy (concurrent sandbox support)", function () {
         const object = { method: createSpy() };
 
-        assert.exception(
-            function () {
-                wrapMethod(object, "method", function () {
-                    return;
-                });
-            },
-            { name: "TypeError" },
-        );
+        refute.exception(function () {
+            wrapMethod(object, "method", function () {
+                return;
+            });
+        });
+
+        assert.isFunction(object.method.restore);
     });
 
-    it("throws if Symbol method is already a spy", function () {
+    it("allows wrapping over a Symbol spy (concurrent sandbox support)", function () {
         if (typeof Symbol !== "function") {
             this.skip();
         }
@@ -245,19 +244,13 @@ describe("util/core/wrapMethod", function () {
         const object = {};
         object[symbol] = createSpy();
 
-        assert.exception(
-            function () {
-                wrapMethod(object, symbol, function () {
-                    return;
-                });
-            },
-            function (err) {
-                return (
-                    err.message ===
-                    "Attempted to wrap Symbol(apple pie) which is already spied on"
-                );
-            },
-        );
+        refute.exception(function () {
+            wrapMethod(object, symbol, function () {
+                return;
+            });
+        });
+
+        assert.isFunction(object[symbol].restore);
     });
 
     describe("originating stack traces", function () {
