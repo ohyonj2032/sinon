@@ -2,6 +2,7 @@ import commons from "@sinonjs/commons";
 import extend from "./util/core/extend.js";
 import nextTick from "./util/core/next-tick.js";
 import exportAsyncBehaviors from "./util/core/export-async-behaviors.js";
+import { getWrappedMethod } from "./util/core/wrap-method.js";
 
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto } = commonsPrototypes;
@@ -211,6 +212,10 @@ const proto = {
 
     effectiveWrappedMethod: function effectiveWrappedMethod() {
         for (let stubb = this.stub; stubb; stubb = stubb.parent) {
+            const wrapped = getWrappedMethod(stubb);
+            if (wrapped) {
+                return wrapped;
+            }
             if (stubb.wrappedMethod) {
                 return stubb.wrappedMethod;
             }

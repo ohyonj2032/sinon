@@ -3,7 +3,9 @@ import mockExpectation from "./mock-expectation.js";
 import createProxyCall from "./proxy-call.js";
 import extend from "./util/core/extend.js";
 import samsam from "@sinonjs/samsam";
-import wrapMethod from "./util/core/wrap-method.js";
+import wrapMethod, {
+    getWrappedMethod,
+} from "./util/core/wrap-method.js";
 
 const { prototypes } = commons;
 const { deepEqual } = samsam;
@@ -75,7 +77,9 @@ extend(mock, {
         }
 
         const expectation = mockExpectation.create(method);
-        expectation.wrappedMethod = this.object[method].wrappedMethod;
+        expectation.wrappedMethod =
+            getWrappedMethod(this.object[method]) ||
+            this.object[method].wrappedMethod;
         push(this.expectations[method], expectation);
 
         return expectation;
