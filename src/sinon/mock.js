@@ -3,19 +3,13 @@ import mockExpectation from "./mock-expectation.js";
 import createProxyCall from "./proxy-call.js";
 import extend from "./util/core/extend.js";
 import samsam from "@sinonjs/samsam";
-import wrapMethod from "./util/core/wrap-method.js";
+import wrapMethod, { getWrappedMethod } from "./util/core/wrap-method.js";
 
 const { prototypes } = commons;
 const { deepEqual } = samsam;
 const { concat, filter, forEach, every, join, push, slice, unshift } =
     prototypes.array;
 
-/**
- * Creates a mock for an object.
- *
- * @param {object|string} object The object to mock, or a name for an anonymous mock
- * @returns {object} The mock object
- */
 export default function mock(object) {
     if (!object || typeof object === "string") {
         return mockExpectation.create(object ? object : "Anonymous mock");
@@ -67,15 +61,20 @@ extend(mock, {
             this.expectations[method] = [];
             const mockObject = this;
 
-            wrapMethod(this.object, method, function () {
-                return mockObject.invokeMethod(method, this, arguments);
-            });
+            wrapMethod(
+                this.object,
+                method,
+                function () {
+                    return mockObject.invokeMethod(method, this, arguments);
+                },
+                this.wrapScope,
+            );
 
             push(this.proxies, method);
         }
 
         const expectation = mockExpectation.create(method);
-        expectation.wrappedMethod = this.object[method].wrappedMethod;
+        expectation.wrappedMethod = getWrappedMethod(this.object[method]);
         push(this.expectations[method], expectation);
 
         return expectation;
@@ -118,8 +117,6 @@ extend(mock, {
     },
 
     invokeMethod: function invokeMethod(method, thisValue, args) {
-        /* if we cannot find any matching files we will explicitly call mockExpection#fail with error messages */
-        /* eslint consistent-return: "off" */
         const expectations =
             this.expectations && this.expectations[method]
                 ? this.expectations[method]
@@ -183,12 +180,9 @@ extend(mock, {
 
         const err = new Error();
         if (!err.stack) {
-            // PhantomJS does not serialize the stack trace until the error has been thrown
             try {
                 throw err;
-            } catch (e) {
-                /* empty */
-            }
+            } catch (e) {}
         }
         push(
             this.failures,

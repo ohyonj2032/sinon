@@ -8,7 +8,7 @@ import extend from "./util/core/extend.js";
 import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
 import isEsModule from "./util/core/is-es-module.js";
 import sinonType from "./util/core/sinon-type.js";
-import wrapMethod from "./util/core/wrap-method.js";
+import wrapMethod, { isWrapScope } from "./util/core/wrap-method.js";
 import throwOnFalsyObject from "./throw-on-falsy-object.js";
 import walkObject from "./util/core/walk-object.js";
 
@@ -24,7 +24,6 @@ const sort = arrayProto.sort;
 let uuid = 0;
 
 function createStub(originalFunc) {
-    // eslint-disable-next-line prefer-const
     let proxy;
 
     function functionStub() {
@@ -43,9 +42,7 @@ function createStub(originalFunc) {
     }
 
     proxy = createProxy(functionStub, originalFunc || functionStub);
-    // Inherit spy API:
     extend.nonEnum(proxy, spy);
-    // Inherit stub API:
     extend.nonEnum(proxy, stub);
 
     const name = originalFunc ? functionName(originalFunc) : null;
@@ -63,8 +60,10 @@ function createStub(originalFunc) {
     return proxy;
 }
 
-export default function stub(object, property) {
-    if (arguments.length > 2) {
+export default function stub(object, property, wrapScope) {
+    const activeWrapScope = isWrapScope(wrapScope) ? wrapScope : undefined;
+
+    if (arguments.length > 2 && !activeWrapScope) {
         throw new TypeError(
             "stub(obj, 'meth', fn) has been removed, see documentation",
         );
@@ -98,7 +97,14 @@ export default function stub(object, property) {
             typeof actualDescriptor.value !== "function");
 
     if (isStubbingEntireObject) {
-        return walkObject(stub, object);
+        return activeWrapScope
+            ? walkObject(
+                  function stubProperty(target, key) {
+                      return stub(target, key, activeWrapScope);
+                  },
+                  object,
+              )
+            : walkObject(stub, object);
     }
 
     if (isCreatingNewStub) {
@@ -125,7 +131,9 @@ export default function stub(object, property) {
         },
     });
 
-    return isStubbingNonFuncProperty ? s : wrapMethod(object, property, s);
+    return isStubbingNonFuncProperty
+        ? s
+        : wrapMethod(object, property, s, activeWrapScope);
 }
 
 function assertValidPropertyDescriptor(descriptor, property) {
@@ -179,29 +187,47 @@ function getCurrentBehavior(stubInstance) {
         : getDefaultBehavior(stubInstance);
 }
 
-const proto = {
-    resetBehavior: function () {
-        this.defaultBehavior = null;
-        this.behaviors = [];
+function resetBehavior() {
+    const fakes = this.fakes || [];
 
-        delete this.returnValue;
-        delete this.returnArgAt;
-        delete this.throwArgAt;
-        delete this.resolveArgAt;
-        delete this.fakeFn;
-        this.returnThis = false;
-        this.resolveThis = false;
+    forEach(fakes, function (fake) {
+        fake.resetBehavior();
+    });
 
-        forEach(this.fakes, function (fake) {
-            fake.resetBehavior();
-        });
-    },
+    this.defaultBehavior = null;
+    this.behaviors = [];
+    this.callArgAt = undefined;
+    this.callbackArguments = [];
+    this.callbackContext = undefined;
+    this.callArgProp = undefined;
+    this.callbackAsync = false;
+    this.callsThrough = false;
+    this.callsThroughWithNew = false;
+    this.exception = undefined;
+    this.exceptionCreator = undefined;
+    this.fakeFn = undefined;
+    this.promiseLibrary = undefined;
+    this.reject = false;
+    this.resolve = false;
+    this.resolveArgAt = undefined;
+    this.resolveThis = false;
+    this.returnArgAt = undefined;
+    this.returnThis = false;
+    this.returnValue = undefined;
+    this.returnValueDefined = false;
+    this.throwArgAt = undefined;
 
-    reset: function () {
-        this.resetHistory();
+    return this;
+}
+
+extend(stub, {
+    create: createStub,
+    resetBehavior: resetBehavior,
+    reset: function reset() {
         this.resetBehavior();
+        this.resetHistory();
+        return this;
     },
-
     onCall: function onCall(index) {
         if (!this.behaviors[index]) {
             this.behaviors[index] = behavior.create(this);
@@ -209,46 +235,19 @@ const proto = {
 
         return this.behaviors[index];
     },
-
     onFirstCall: function onFirstCall() {
         return this.onCall(0);
     },
-
     onSecondCall: function onSecondCall() {
         return this.onCall(1);
     },
-
     onThirdCall: function onThirdCall() {
         return this.onCall(2);
     },
-
-    withArgs: function withArgs() {
-        const fake = spy.withArgs.apply(this, arguments);
-        if (this.defaultBehavior && this.defaultBehavior.promiseLibrary) {
-            fake.defaultBehavior =
-                fake.defaultBehavior || behavior.create(fake);
-            fake.defaultBehavior.promiseLibrary =
-                this.defaultBehavior.promiseLibrary;
-        }
-        return fake;
-    },
-};
-
-forEach(Object.keys(behavior), function (method) {
-    if (
-        hasOwnProperty(behavior, method) &&
-        !hasOwnProperty(proto, method) &&
-        method !== "create" &&
-        method !== "invoke"
-    ) {
-        proto[method] = behavior.createBehavior(method);
-    }
 });
 
 forEach(Object.keys(behaviors), function (method) {
-    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(proto, method)) {
+    if (hasOwnProperty(behaviors, method) && !hasOwnProperty(stub, method)) {
         behavior.addBehavior(stub, method, behaviors[method]);
     }
 });
-
-extend(stub, proto);

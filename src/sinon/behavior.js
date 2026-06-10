@@ -2,6 +2,7 @@ import commons from "@sinonjs/commons";
 import extend from "./util/core/extend.js";
 import nextTick from "./util/core/next-tick.js";
 import exportAsyncBehaviors from "./util/core/export-async-behaviors.js";
+import { getWrappedMethod } from "./util/core/wrap-method.js";
 
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto } = commonsPrototypes;
@@ -77,8 +78,6 @@ function getCallbackError(behavior, func, args) {
 }
 
 function ensureArgs(name, behavior, args) {
-    // map function name to internal property
-    //   callsArg => callArgAt
     const property = name.replace(/sArg/, "ArgAt");
     const index = behavior[property];
 
@@ -148,14 +147,7 @@ const proto = {
         );
     },
 
-    /*eslint complexity: ["error", 20]*/
     invoke: function invoke(context, args) {
-        /*
-         * callCallback (conditionally) calls ensureArgs
-         *
-         * Note: callCallback intentionally happens before
-         * everything else and cannot be moved lower
-         */
         const returnValue = callCallback(this, args);
 
         if (this.exception) {
@@ -190,11 +182,8 @@ const proto = {
 
             return wrappedMethod.apply(context, args);
         } else if (this.callsThroughWithNew) {
-            // Get the original method (assumed to be a constructor in this case)
             const WrappedClass = this.effectiveWrappedMethod();
-            // Turn the arguments object into a normal array
             const argsArray = slice(args);
-            // Call the constructor
             const F = WrappedClass.bind.apply(
                 WrappedClass,
                 concat([null], argsArray),
@@ -211,8 +200,10 @@ const proto = {
 
     effectiveWrappedMethod: function effectiveWrappedMethod() {
         for (let stubb = this.stub; stubb; stubb = stubb.parent) {
-            if (stubb.wrappedMethod) {
-                return stubb.wrappedMethod;
+            const wrappedMethod = getWrappedMethod(stubb);
+
+            if (wrappedMethod) {
+                return wrappedMethod;
             }
         }
         throw new Error("Unable to find wrapped method");
@@ -234,7 +225,7 @@ const proto = {
         return this.stub.onThirdCall();
     },
 
-    withArgs: function withArgs(/* arguments */) {
+    withArgs: function withArgs() {
         throw new Error(
             'Defining a stub by invoking "stub.onCall(...).withArgs(...)" ' +
                 'is not supported. Use "stub.withArgs(...).onCall(...)" ' +

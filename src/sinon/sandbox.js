@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
 import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
+import { createWrapScope } from "./util/core/wrap-method.js";
 
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
@@ -18,6 +19,7 @@ const { createMatcher: match } = samsam;
 const DEFAULT_LEAK_THRESHOLD = 10000;
 
 const filter = arrayProto.filter;
+const slice = arrayProto.slice;
 
 /**
  * @callback RestorerFunction
@@ -73,13 +75,6 @@ function checkForValidArguments(descriptor, property, replacement) {
     }
 }
 
-/**
- * Creates a sandbox.
- *
- * @param {object} [opts] Options for the sandbox
- * @returns {object} The sandbox object
- * @class
- */
 export default function Sandbox(opts = {}) {
     const sandbox = this;
     const assertOptions = opts.assertOptions || {};
@@ -88,6 +83,7 @@ export default function Sandbox(opts = {}) {
     let collection = [];
     let loggedLeakWarning = false;
     sandbox.leakThreshold = DEFAULT_LEAK_THRESHOLD;
+    sandbox.wrapScope = createWrapScope();
 
     function addToCollection(object) {
         if (
@@ -105,7 +101,6 @@ export default function Sandbox(opts = {}) {
 
     sandbox.assert = sinonAssert.createAssertObject(assertOptions);
 
-    // this is for testing only
     sandbox.getFakes = function getFakes() {
         return collection;
     };
@@ -196,7 +191,13 @@ export default function Sandbox(opts = {}) {
     }
 
     sandbox.spy = function () {
-        const createdSpy = sinonSpy.apply(sinonSpy, arguments);
+        const spyArguments = slice(arguments);
+        while (spyArguments.length < 3) {
+            push(spyArguments, undefined);
+        }
+        push(spyArguments, sandbox.wrapScope);
+
+        const createdSpy = sinonSpy.apply(sinonSpy, spyArguments);
         const result = commonPostInitSetup(
             arguments,
             createdSpy,
@@ -217,7 +218,10 @@ export default function Sandbox(opts = {}) {
     extend(sandbox.spy, sinonSpy);
 
     sandbox.stub = function () {
-        const createdStub = sinonStub.apply(sinonStub, arguments);
+        const stubArguments = slice(arguments);
+        push(stubArguments, sandbox.wrapScope);
+
+        const createdStub = sinonStub.apply(sinonStub, stubArguments);
         const result = commonPostInitSetup(
             arguments,
             createdStub,
@@ -239,6 +243,7 @@ export default function Sandbox(opts = {}) {
 
     sandbox.mock = function () {
         const m = sinonMock.apply(null, arguments);
+        m.wrapScope = sandbox.wrapScope;
 
         addToCollection(m);
 
@@ -318,13 +323,6 @@ export default function Sandbox(opts = {}) {
         sandbox.injectedKeys.length = 0;
     };
 
-    /**
-     * Creates a restorer function for the property
-     * @param {object} object the object containing the property
-     * @param {string} property the name of the property
-     * @param {boolean} [forceAssignment] if true, uses assignment instead of DefineProperty
-     * @returns {RestorerFunction} restorer function
-     */
     function getFakeRestorer(object, property, forceAssignment = false) {
         const descriptor = getPropertyDescriptor(object, property);
         const value = forceAssignment && object[property];
@@ -370,7 +368,6 @@ export default function Sandbox(opts = {}) {
 
         verifySameType(object, property, replacement);
 
-        // store a function for restoring the replaced property
         push(fakeRestorers, getFakeRestorer(object, property));
 
         object[property] = replacement;
@@ -390,7 +387,6 @@ export default function Sandbox(opts = {}) {
 
         verifySameType(object, property, replacement);
 
-        // store a function for restoring the replaced property
         push(fakeRestorers, getFakeRestorer(object, property, true));
 
         object[property] = replacement;
@@ -417,7 +413,6 @@ export default function Sandbox(opts = {}) {
             );
         }
 
-        // store a function for restoring the defined property
         push(fakeRestorers, getFakeRestorer(object, property));
 
         Object.defineProperty(object, property, {
@@ -465,10 +460,8 @@ export default function Sandbox(opts = {}) {
             );
         }
 
-        // store a function for restoring the replaced property
         push(fakeRestorers, getFakeRestorer(object, property));
 
-        // eslint-disable-next-line accessor-pairs
         Object.defineProperty(object, property, {
             set: replacement,
             configurable: true,
@@ -513,7 +506,6 @@ export default function Sandbox(opts = {}) {
             );
         }
 
-        // store a function for property for restoring the replaced property
         push(fakeRestorers, getFakeRestorer(object, property));
 
         Object.defineProperty(object, property, {

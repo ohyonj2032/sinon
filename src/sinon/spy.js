@@ -6,7 +6,7 @@ import getPropertyDescriptor from "./util/core/get-property-descriptor.js";
 import isEsModule from "./util/core/is-es-module.js";
 import * as proxyCallUtil from "./proxy-call-util.js";
 import walkObject from "./util/core/walk-object.js";
-import wrapMethod from "./util/core/wrap-method.js";
+import wrapMethod, { isWrapScope } from "./util/core/wrap-method.js";
 
 const { prototypes, functionName, valueToString } = commons;
 const { deepEqual } = samsam;
@@ -32,7 +32,6 @@ function matches(fake, args, strict) {
     return false;
 }
 
-// Public API
 const spyApi = {
     withArgs: function () {
         const args = slice(arguments);
@@ -69,7 +68,6 @@ const spyApi = {
         return fakeInstance;
     },
 
-    // Override proxy default implementation
     matchingFakes: function (args, strict) {
         return filter.call(this.fakes, function (fakeInstance) {
             return matches(fakeInstance, args, strict);
@@ -100,7 +98,6 @@ delegateToCalls(spyApi, "yield", false, "yield", true, function () {
         `${this.toString()} cannot yield since it was not yet invoked.`,
     );
 });
-// "invokeCallback" is an alias for "yield" since "yield" is invalid in strict mode.
 spyApi.invokeCallback = spyApi.yield;
 delegateToCalls(spyApi, "yieldOn", false, "yieldOn", true, function () {
     throw new Error(
@@ -143,7 +140,6 @@ function createSpy(func) {
 
     const proxy = createProxy(funk, funk);
 
-    // Inherit spy API:
     extend.nonEnum(proxy, spyApi);
     extend.nonEnum(proxy, {
         displayName: name || "spy",
@@ -154,15 +150,9 @@ function createSpy(func) {
     return proxy;
 }
 
-/**
- * Creates a spy.
- *
- * @param {object|SinonFunction} [object] The object or function to spy on
- * @param {string} [property] The property name to spy on
- * @param {Array} [types] Types of accessor to spy on (get, set)
- * @returns {SinonFunction|object} The spy or an object with spied accessors
- */
-export default function spy(object, property, types) {
+export default function spy(object, property, types, wrapScope) {
+    const activeWrapScope = isWrapScope(wrapScope) ? wrapScope : undefined;
+
     if (isEsModule(object)) {
         throw new TypeError("ES Modules cannot be spied");
     }
@@ -172,7 +162,14 @@ export default function spy(object, property, types) {
     }
 
     if (!property && typeof object === "object") {
-        return walkObject(spy, object);
+        return activeWrapScope
+            ? walkObject(
+                  function spyProperty(target, key) {
+                      return spy(target, key, undefined, activeWrapScope);
+                  },
+                  object,
+              )
+            : walkObject(spy, object);
     }
 
     if (!object && !property) {
@@ -182,7 +179,12 @@ export default function spy(object, property, types) {
     }
 
     if (!types) {
-        return wrapMethod(object, property, createSpy(object[property]));
+        return wrapMethod(
+            object,
+            property,
+            createSpy(object[property]),
+            activeWrapScope,
+        );
     }
 
     const descriptor = {};
@@ -192,7 +194,7 @@ export default function spy(object, property, types) {
         descriptor[type] = createSpy(methodDesc[type]);
     });
 
-    return wrapMethod(object, property, descriptor);
+    return wrapMethod(object, property, descriptor, activeWrapScope);
 }
 
 extend(spy, spyApi);
