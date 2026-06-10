@@ -384,7 +384,25 @@ export default function createProxy(func, originalFunc) {
     // Inherit function properties:
     extend(proxy, func);
 
-    proxy.prototype = func.prototype;
+    // When stubbing a constructor, `func` is the internal stub wrapper whose
+    // `prototype` is a generic empty object.  We must forward the proxy's
+    // `prototype` to the *original* constructor's prototype so that:
+    //   1. `new stub()` creates instances whose [[Prototype]] is the original
+    //      constructor's prototype (making `instanceof` work correctly).
+    //   2. `calledWithNew()` — which checks `thisValue instanceof this.proxy`
+    //      — returns `true` when the stub is invoked via `new`.
+    //   3. The proxy retains a valid [[Construct]] internal method (already
+    //      guaranteed by `wrapFunction` using a regular function declaration).
+    if (
+        originalFunc !== func &&
+        typeof originalFunc === "function" &&
+        typeof originalFunc.prototype === "object" &&
+        originalFunc.prototype !== null
+    ) {
+        proxy.prototype = originalFunc.prototype;
+    } else {
+        proxy.prototype = func.prototype;
+    }
 
     extend.nonEnum(proxy, proxyApi);
 
