@@ -17,62 +17,77 @@ function getAllFiles(dir, fileList = []) {
     return fileList;
 }
 
-export default {
-    input: getAllFiles("src"),
-    output: {
-        dir: "lib",
-        format: "cjs",
-        preserveModules: true,
-        preserveModulesRoot: "src",
-        exports: "auto",
-        interop: "auto",
-    },
-    plugins: [nodeResolve(), commonjs(), json()],
-    external: (id, parentId) => {
-        if (id.startsWith("node:")) {
-            return true;
-        }
-
-        // Resolve the path if possible
-        let resolvedPath;
-        if (id.startsWith("src/")) {
-            resolvedPath = path.resolve(process.cwd(), id);
-        } else if (path.isAbsolute(id)) {
-            resolvedPath = id;
-        } else if (id.startsWith(".")) {
-            resolvedPath = path.resolve(
-                parentId ? path.dirname(parentId) : ".",
-                id,
-            );
-        } else {
-            // Named imports (node_modules) are external
-            return true;
-        }
-
-        const srcPath = path.resolve(process.cwd(), "src");
-        if (resolvedPath.startsWith(srcPath)) {
-            // It's inside src/.
-            // If it's an entry point (no parentId), we must treat it as NOT external.
-            if (!parentId) {
-                return false;
+export default [
+    {
+        input: getAllFiles("src").filter(file => !file.endsWith("sinon-esm.js")),
+        output: {
+            dir: "lib",
+            format: "cjs",
+            preserveModules: true,
+            preserveModulesRoot: "src",
+            exports: "auto",
+            interop: "auto",
+        },
+        plugins: [nodeResolve(), commonjs(), json()],
+        external: (id, parentId) => {
+            if (id.startsWith("node:")) {
+                return true;
             }
 
-            // For other files, check if they exist in src/
-            const exists =
-                fs.existsSync(resolvedPath) ||
-                fs.existsSync(`${resolvedPath}.js`) ||
-                fs.existsSync(`${resolvedPath}.mjs`);
+            // Resolve the path if possible
+            let resolvedPath;
+            if (id.startsWith("src/")) {
+                resolvedPath = path.resolve(process.cwd(), id);
+            } else if (path.isAbsolute(id)) {
+                resolvedPath = id;
+            } else if (id.startsWith(".")) {
+                resolvedPath = path.resolve(
+                    parentId ? path.dirname(parentId) : ".",
+                    id,
+                );
+            } else {
+                // Named imports (node_modules) are external
+                return true;
+            }
 
-            if (exists) {
-                return false;
-            } // Exists in src/, so transpile it
+            const srcPath = path.resolve(process.cwd(), "src");
+            if (resolvedPath.startsWith(srcPath)) {
+                // It's inside src/.
+                // If it's an entry point (no parentId), we must treat it as NOT external.
+                if (!parentId) {
+                    return false;
+                }
 
-            // Doesn't exist in src/, so it must be a relative import to a file
-            // that we haven't ported yet, but will exist in lib/.
+                // For other files, check if they exist in src/
+                const exists =
+                    fs.existsSync(resolvedPath) ||
+                    fs.existsSync(`${resolvedPath}.js`) ||
+                    fs.existsSync(`${resolvedPath}.mjs`);
+
+                if (exists) {
+                    return false;
+                } // Exists in src/, so transpile it
+
+                // Doesn't exist in src/, so it must be a relative import to a file
+                // that we haven't ported yet, but will exist in lib/.
+                return true;
+            }
+
+            // Everything else (outside src/) is external
             return true;
-        }
-
-        // Everything else (outside src/) is external
-        return true;
+        },
     },
-};
+    {
+        input: "src/sinon-esm.js",
+        output: {
+            file: "pkg/sinon-esm.js",
+            format: "esm",
+            exports: "named",
+        },
+        plugins: [nodeResolve(), commonjs(), json()],
+        external: (id) => id.includes("sinon.js") || id.startsWith("node:"),
+        treeshake: {
+            moduleSideEffects: false
+        }
+    }
+];

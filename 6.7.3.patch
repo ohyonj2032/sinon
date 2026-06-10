@@ -1,0 +1,220 @@
+diff --git a/rollup.config.mjs b/rollup.config.mjs
+index d6010a8d..ee0fced6 100644
+--- a/rollup.config.mjs
++++ b/rollup.config.mjs
+@@ -17,62 +17,77 @@ function getAllFiles(dir, fileList = []) {
+     return fileList;
+ }
+ 
+-export default {
+-    input: getAllFiles("src"),
+-    output: {
+-        dir: "lib",
+-        format: "cjs",
+-        preserveModules: true,
+-        preserveModulesRoot: "src",
+-        exports: "auto",
+-        interop: "auto",
+-    },
+-    plugins: [nodeResolve(), commonjs(), json()],
+-    external: (id, parentId) => {
+-        if (id.startsWith("node:")) {
+-            return true;
+-        }
+-
+-        // Resolve the path if possible
+-        let resolvedPath;
+-        if (id.startsWith("src/")) {
+-            resolvedPath = path.resolve(process.cwd(), id);
+-        } else if (path.isAbsolute(id)) {
+-            resolvedPath = id;
+-        } else if (id.startsWith(".")) {
+-            resolvedPath = path.resolve(
+-                parentId ? path.dirname(parentId) : ".",
+-                id,
+-            );
+-        } else {
+-            // Named imports (node_modules) are external
+-            return true;
+-        }
++export default [
++    {
++        input: getAllFiles("src").filter(file => !file.endsWith("sinon-esm.js")),
++        output: {
++            dir: "lib",
++            format: "cjs",
++            preserveModules: true,
++            preserveModulesRoot: "src",
++            exports: "auto",
++            interop: "auto",
++        },
++        plugins: [nodeResolve(), commonjs(), json()],
++        external: (id, parentId) => {
++            if (id.startsWith("node:")) {
++                return true;
++            }
+ 
+-        const srcPath = path.resolve(process.cwd(), "src");
+-        if (resolvedPath.startsWith(srcPath)) {
+-            // It's inside src/.
+-            // If it's an entry point (no parentId), we must treat it as NOT external.
+-            if (!parentId) {
+-                return false;
++            // Resolve the path if possible
++            let resolvedPath;
++            if (id.startsWith("src/")) {
++                resolvedPath = path.resolve(process.cwd(), id);
++            } else if (path.isAbsolute(id)) {
++                resolvedPath = id;
++            } else if (id.startsWith(".")) {
++                resolvedPath = path.resolve(
++                    parentId ? path.dirname(parentId) : ".",
++                    id,
++                );
++            } else {
++                // Named imports (node_modules) are external
++                return true;
+             }
+ 
+-            // For other files, check if they exist in src/
+-            const exists =
+-                fs.existsSync(resolvedPath) ||
+-                fs.existsSync(`${resolvedPath}.js`) ||
+-                fs.existsSync(`${resolvedPath}.mjs`);
++            const srcPath = path.resolve(process.cwd(), "src");
++            if (resolvedPath.startsWith(srcPath)) {
++                // It's inside src/.
++                // If it's an entry point (no parentId), we must treat it as NOT external.
++                if (!parentId) {
++                    return false;
++                }
+ 
+-            if (exists) {
+-                return false;
+-            } // Exists in src/, so transpile it
++                // For other files, check if they exist in src/
++                const exists =
++                    fs.existsSync(resolvedPath) ||
++                    fs.existsSync(`${resolvedPath}.js`) ||
++                    fs.existsSync(`${resolvedPath}.mjs`);
+ 
+-            // Doesn't exist in src/, so it must be a relative import to a file
+-            // that we haven't ported yet, but will exist in lib/.
+-            return true;
+-        }
++                if (exists) {
++                    return false;
++                } // Exists in src/, so transpile it
++
++                // Doesn't exist in src/, so it must be a relative import to a file
++                // that we haven't ported yet, but will exist in lib/.
++                return true;
++            }
+ 
+-        // Everything else (outside src/) is external
+-        return true;
++            // Everything else (outside src/) is external
++            return true;
++        },
+     },
+-};
++    {
++        input: "src/sinon-esm.js",
++        output: {
++            file: "pkg/sinon-esm.js",
++            format: "esm",
++            exports: "named",
++        },
++        plugins: [nodeResolve(), commonjs(), json()],
++        external: (id) => id.includes("sinon.js") || id.startsWith("node:"),
++        treeshake: {
++            moduleSideEffects: false
++        }
++    }
++];
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..666df76a 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -17,6 +17,10 @@ const { createMatcher: match } = samsam;
+ 
+ const DEFAULT_LEAK_THRESHOLD = 10000;
+ 
++// 将底层的WeakMap状态注册表提升为跨CJS/ESM边界的共享单例
++const SHARED_REGISTRY_KEY = Symbol.for("sinon.sharedWeakMapRegistry");
++const globalRegistry = globalThis[SHARED_REGISTRY_KEY] || (globalThis[SHARED_REGISTRY_KEY] = new WeakMap());
++
+ const filter = arrayProto.filter;
+ 
+ /**
+@@ -303,6 +307,7 @@ export default function Sandbox(opts = {}) {
+         reverse(fakeRestorers);
+         forEach(fakeRestorers, function (restorer) {
+             restorer();
++            untrackReplaced(restorer.object, restorer.property);
+         });
+         fakeRestorers.length = 0;
+ 
+@@ -347,6 +352,13 @@ export default function Sandbox(opts = {}) {
+     }
+ 
+     function verifyNotReplaced(object, property) {
++        if (globalRegistry.has(object) && globalRegistry.get(object).has(property)) {
++            throw new TypeError(
++                `Attempted to replace ${valueToString(
++                    property,
++                )} which is already replaced`,
++            );
++        }
+         forEach(fakeRestorers, function (fakeRestorer) {
+             if (
+                 fakeRestorer.object === object &&
+@@ -361,6 +373,19 @@ export default function Sandbox(opts = {}) {
+         });
+     }
+ 
++    function trackReplaced(object, property) {
++        if (!globalRegistry.has(object)) {
++            globalRegistry.set(object, new Map());
++        }
++        globalRegistry.get(object).set(property, true);
++    }
++
++    function untrackReplaced(object, property) {
++        if (globalRegistry.has(object)) {
++            globalRegistry.get(object).delete(property);
++        }
++    }
++
+     sandbox.replace = function replace(object, property, replacement) {
+         const descriptor = getPropertyDescriptor(object, property);
+ 
+@@ -372,6 +397,7 @@ export default function Sandbox(opts = {}) {
+ 
+         // store a function for restoring the replaced property
+         push(fakeRestorers, getFakeRestorer(object, property));
++        trackReplaced(object, property);
+ 
+         object[property] = replacement;
+ 
+@@ -419,6 +445,7 @@ export default function Sandbox(opts = {}) {
+ 
+         // store a function for restoring the defined property
+         push(fakeRestorers, getFakeRestorer(object, property));
++        trackReplaced(object, property);
+ 
+         Object.defineProperty(object, property, {
+             value: value,
+@@ -515,6 +542,7 @@ export default function Sandbox(opts = {}) {
+ 
+         // store a function for property for restoring the replaced property
+         push(fakeRestorers, getFakeRestorer(object, property));
++        trackReplaced(object, property);
+ 
+         Object.defineProperty(object, property, {
+             get: replacement,
+@@ -577,3 +605,4 @@ export default function Sandbox(opts = {}) {
+ }
+ 
+ Sandbox.prototype.match = match;
++Sandbox.prototype.match = match;

@@ -17,6 +17,10 @@ const { createMatcher: match } = samsam;
 
 const DEFAULT_LEAK_THRESHOLD = 10000;
 
+// 将底层的WeakMap状态注册表提升为跨CJS/ESM边界的共享单例
+const SHARED_REGISTRY_KEY = Symbol.for("sinon.sharedWeakMapRegistry");
+const globalRegistry = globalThis[SHARED_REGISTRY_KEY] || (globalThis[SHARED_REGISTRY_KEY] = new WeakMap());
+
 const filter = arrayProto.filter;
 
 /**
@@ -303,6 +307,7 @@ export default function Sandbox(opts = {}) {
         reverse(fakeRestorers);
         forEach(fakeRestorers, function (restorer) {
             restorer();
+            untrackReplaced(restorer.object, restorer.property);
         });
         fakeRestorers.length = 0;
 
@@ -347,6 +352,13 @@ export default function Sandbox(opts = {}) {
     }
 
     function verifyNotReplaced(object, property) {
+        if (globalRegistry.has(object) && globalRegistry.get(object).has(property)) {
+            throw new TypeError(
+                `Attempted to replace ${valueToString(
+                    property,
+                )} which is already replaced`,
+            );
+        }
         forEach(fakeRestorers, function (fakeRestorer) {
             if (
                 fakeRestorer.object === object &&
@@ -361,6 +373,19 @@ export default function Sandbox(opts = {}) {
         });
     }
 
+    function trackReplaced(object, property) {
+        if (!globalRegistry.has(object)) {
+            globalRegistry.set(object, new Map());
+        }
+        globalRegistry.get(object).set(property, true);
+    }
+
+    function untrackReplaced(object, property) {
+        if (globalRegistry.has(object)) {
+            globalRegistry.get(object).delete(property);
+        }
+    }
+
     sandbox.replace = function replace(object, property, replacement) {
         const descriptor = getPropertyDescriptor(object, property);
 
@@ -372,6 +397,7 @@ export default function Sandbox(opts = {}) {
 
         // store a function for restoring the replaced property
         push(fakeRestorers, getFakeRestorer(object, property));
+        trackReplaced(object, property);
 
         object[property] = replacement;
 
@@ -419,6 +445,7 @@ export default function Sandbox(opts = {}) {
 
         // store a function for restoring the defined property
         push(fakeRestorers, getFakeRestorer(object, property));
+        trackReplaced(object, property);
 
         Object.defineProperty(object, property, {
             value: value,
@@ -467,6 +494,7 @@ export default function Sandbox(opts = {}) {
 
         // store a function for restoring the replaced property
         push(fakeRestorers, getFakeRestorer(object, property));
+        trackReplaced(object, property);
 
         // eslint-disable-next-line accessor-pairs
         Object.defineProperty(object, property, {
