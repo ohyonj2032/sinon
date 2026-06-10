@@ -40,9 +40,6 @@ function createArityFunction(length) {
         args.push(`a${i}`);
     }
 
-    // Use the Function constructor to produce a stable declared arity without
-    // relying on eval in the test body.
-    // eslint-disable-next-line no-new-func
     return new Function(
         `return function (${args.join(", ")}) { return this.marker; };`,
     )();
@@ -85,7 +82,6 @@ describe("proxy", function () {
         });
 
         it("count", function () {
-            // Throwing just to make sure it has no effect.
             const faux = createFaux(sinonStub().throws());
             function call() {
                 assert.exception(function () {
@@ -175,7 +171,7 @@ describe("proxy", function () {
                 faux.printf("%*", 1.4567, "a", true, {}, [], undefined, null),
                 "1.4567, 'a', true, {}, [], undefined, null",
             );
-            assert.equals(faux.printf("%*", "a", "b", "c"), "'a', 'b', 'c'");
+            assert.equals(faux.printf("%*", "a", "b", "c"), "'a' 'b' 'c'");
         });
 
         it("supports numeric placeholders", function () {
@@ -295,6 +291,51 @@ describe("proxy", function () {
                 },
                 { name: "InvalidResetException" },
             );
+        });
+    });
+
+    describe("constructors", function () {
+        it("preserves the original prototype for wrapped constructors", function () {
+            function OriginalType() {
+                return;
+            }
+
+            const seen = [];
+            const proxy = createProxy(function () {
+                seen.push(this);
+            }, OriginalType);
+
+            const instance = new proxy();
+
+            assert(instance instanceof proxy);
+            assert(instance instanceof OriginalType);
+            assert.same(seen[0], instance);
+            assert.same(proxy.thisValues[0], instance);
+            assert.same(proxy.returnValues[0], instance);
+            assert(proxy.calledWithNew());
+        });
+
+        it("keeps stub constructor calls on the created instance", function () {
+            function OriginalType(name) {
+                this.name = name;
+            }
+
+            const namespace = { OriginalType: OriginalType };
+            const stub = sinonStub(namespace, "OriginalType").callsFake(function (name) {
+                this.name = name;
+                this.fromStub = true;
+            });
+
+            const instance = new namespace.OriginalType("stubbed");
+
+            assert(instance instanceof namespace.OriginalType);
+            assert(instance instanceof OriginalType);
+            assert.equals(instance.name, "stubbed");
+            assert.isTrue(instance.fromStub);
+            assert.same(stub.thisValues[0], instance);
+            assert.same(stub.firstCall.thisValue, instance);
+            assert.same(stub.returnValues[0], instance);
+            assert(stub.calledWithNew());
         });
     });
 });

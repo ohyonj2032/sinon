@@ -18,7 +18,6 @@ const { push, forEach, slice } = prototypes.array;
 
 const emptyFakes = [];
 
-// Public API
 const proxyApi = {
     toString: functionToString,
 
@@ -26,8 +25,6 @@ const proxyApi = {
         this.displayName = name;
         const nameDescriptor = Object.getOwnPropertyDescriptor(this, "name");
         if (nameDescriptor && nameDescriptor.configurable) {
-            // IE 11 functions don't have a name.
-            // Safari 9 has names that are not configurable.
             nameDescriptor.value = name;
             Object.defineProperty(this, "name", nameDescriptor);
         }
@@ -36,10 +33,6 @@ const proxyApi = {
 
     invoke: proxyInvoke,
 
-    /*
-     * Hook for derived implementation to return fake instances matching the
-     * given arguments.
-     */
     matchingFakes: function (/*args, strict*/) {
         return emptyFakes;
     },
@@ -47,7 +40,6 @@ const proxyApi = {
     getCall: function getCall(index) {
         let i = index;
         if (i < 0) {
-            // Negative indices means counting backwards from the last call
             i += this.callCount;
         }
         if (i < 0 || i >= this.callCount) {
@@ -247,103 +239,97 @@ delegateToCalls(proxyApi, "alwaysCalledWithNew", false, "calledWithNew");
 function wrapFunction(func, originalFunc) {
     const arity = originalFunc.length;
     let p;
-    // Do not change this to use an eval. Projects that depend on sinon block the use of eval.
-    // ref: https://github.com/sinonjs/sinon/issues/710
     switch (arity) {
-        /*eslint-disable no-unused-vars*/
         case 0:
             p = function proxy() {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 1:
             p = function proxy(a) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 2:
             p = function proxy(a, b) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 3:
             p = function proxy(a, b, c) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 4:
             p = function proxy(a, b, c, d) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 5:
             p = function proxy(a, b, c, d, e) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 6:
             p = function proxy(a, b, c, d, e, f) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 7:
             p = function proxy(a, b, c, d, e, f, g) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 8:
             p = function proxy(a, b, c, d, e, f, g, h) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 9:
             p = function proxy(a, b, c, d, e, f, g, h, i) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 10:
             p = function proxy(a, b, c, d, e, f, g, h, i, j) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 11:
             p = function proxy(a, b, c, d, e, f, g, h, i, j, k) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         case 12:
             p = function proxy(a, b, c, d, e, f, g, h, i, j, k, l) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
         default:
             p = function proxy() {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                return p.invoke(func, this, slice(arguments), new.target);
             };
             break;
-        /*eslint-enable*/
     }
     const nameDescriptor = Object.getOwnPropertyDescriptor(
         originalFunc,
         "name",
     );
     if (nameDescriptor && nameDescriptor.configurable) {
-        // IE 11 functions don't have a name.
-        // Safari 9 has names that are not configurable.
         Object.defineProperty(p, "name", nameDescriptor);
     }
     extend.nonEnum(p, {
@@ -371,22 +357,29 @@ function wrapFunction(func, originalFunc) {
     return p;
 }
 
-/**
- * Creates a proxy function.
- *
- * @param {SinonFunction} func The original function
- * @param {SinonFunction} originalFunc The original function (for arity and name)
- * @returns {SinonFunction} The proxy function
- */
+function getOriginalPrototype(originalFunc, func) {
+    if (
+        typeof originalFunc === "function" &&
+        originalFunc.prototype &&
+        typeof originalFunc.prototype === "object"
+    ) {
+        return originalFunc.prototype;
+    }
+
+    return func.prototype;
+}
+
 export default function createProxy(func, originalFunc) {
     const proxy = wrapFunction(func, originalFunc);
 
-    // Inherit function properties:
     extend(proxy, func);
 
-    proxy.prototype = func.prototype;
+    proxy.prototype = getOriginalPrototype(originalFunc, func);
 
-    extend.nonEnum(proxy, proxyApi);
+    extend.nonEnum(proxy, proxyApi, {
+        func: func,
+        originalFunc: originalFunc,
+    });
 
     return proxy;
 }

@@ -16,15 +16,38 @@ const maxSafeInteger = Number.MAX_SAFE_INTEGER;
  * @returns {unknown}
  */
 
+function isClassConstructor(func) {
+    if (typeof func !== "function") {
+        return false;
+    }
+
+    const descriptor = Object.getOwnPropertyDescriptor(func, "prototype");
+
+    return Boolean(descriptor && descriptor.writable === false);
+}
+
+function invokeWithConstructor(func, thisValue, args, newTarget) {
+    if (!isClassConstructor(func)) {
+        return func.apply(thisValue, args);
+    }
+
+    if (typeof Reflect !== "undefined" && typeof Reflect.construct === "function") {
+        return Reflect.construct(func, args, newTarget);
+    }
+
+    return new (bind.apply(func, concat([thisValue], args)))();
+}
+
 /**
  * Invokes a proxy function.
  *
  * @param {SinonFunction} func The original function
  * @param {unknown} thisValue The `this` context for the call
  * @param {Array} args The arguments for the call
+ * @param {Function} [newTarget] The constructor used with `new`
  * @returns {unknown} The return value of the function call
  */
-export default function invoke(func, thisValue, args) {
+export default function invoke(func, thisValue, args, newTarget) {
     const matchings = this.matchingFakes(args);
     const currentCallId = callId;
     callId = callId >= maxSafeInteger ? 0 : callId + 1;
@@ -41,7 +64,6 @@ export default function invoke(func, thisValue, args) {
         push(matching.callIds, currentCallId);
     });
 
-    // Make call properties available from within the spied function:
     proxyCallUtil.createCallProperties(this);
     forEach(matchings, proxyCallUtil.createCallProperties);
 
@@ -51,11 +73,12 @@ export default function invoke(func, thisValue, args) {
         const thisCall = this.getCall(this.callCount - 1);
 
         if (thisCall.calledWithNew()) {
-            // Call through with `new`
-            returnValue = new (bind.apply(
+            returnValue = invokeWithConstructor(
                 this.func || func,
-                concat([thisValue], args),
-            ))();
+                thisValue,
+                args,
+                newTarget || this,
+            );
 
             if (
                 typeof returnValue !== "object" &&
@@ -80,9 +103,6 @@ export default function invoke(func, thisValue, args) {
     });
 
     const err = new ErrorConstructor();
-    // 1. Please do not get stack at this point. It may be so very slow, and not actually used
-    // 2. PhantomJS does not serialize the stack trace until the error has been thrown:
-    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/Stack
     try {
         throw err;
     } catch (e) {
@@ -93,7 +113,6 @@ export default function invoke(func, thisValue, args) {
         push(matching.errorsWithCallStack, err);
     });
 
-    // Make return value and exception available in the calls:
     proxyCallUtil.createCallProperties(this);
     forEach(matchings, proxyCallUtil.createCallProperties);
 
