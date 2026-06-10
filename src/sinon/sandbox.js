@@ -16,8 +16,41 @@ const { deprecated: logger, valueToString } = commons;
 const { createMatcher: match } = samsam;
 
 const DEFAULT_LEAK_THRESHOLD = 10000;
+const SHARED_STATE_SYMBOL = Symbol.for("sinon/shared-state");
 
 const filter = arrayProto.filter;
+
+function createSharedState() {
+    return {
+        collection: [],
+        fakeRestorers: [],
+        replacementRegistry: new WeakMap(),
+        wrappedMethodRegistry: new WeakMap(),
+    };
+}
+
+function getSharedState() {
+    if (!globalThis[SHARED_STATE_SYMBOL]) {
+        Object.defineProperty(globalThis, SHARED_STATE_SYMBOL, {
+            value: createSharedState(),
+            configurable: true,
+            writable: true,
+        });
+    }
+
+    return globalThis[SHARED_STATE_SYMBOL];
+}
+
+function getRegisteredProperties(registry, object, shouldCreate = false) {
+    let registeredProperties = registry.get(object);
+
+    if (!registeredProperties && shouldCreate) {
+        registeredProperties = new Map();
+        registry.set(object, registeredProperties);
+    }
+
+    return registeredProperties || null;
+}
 
 /**
  * @callback RestorerFunction
@@ -83,9 +116,13 @@ function checkForValidArguments(descriptor, property, replacement) {
 export default function Sandbox(opts = {}) {
     const sandbox = this;
     const assertOptions = opts.assertOptions || {};
-    const fakeRestorers = [];
+    const sharedState = opts.useGlobalCollection ? getSharedState() : null;
+    const fakeRestorers = sharedState ? sharedState.fakeRestorers : [];
+    const replacementRegistry = sharedState
+        ? sharedState.replacementRegistry
+        : new WeakMap();
 
-    let collection = [];
+    let collection = sharedState ? sharedState.collection : [];
     let loggedLeakWarning = false;
     sandbox.leakThreshold = DEFAULT_LEAK_THRESHOLD;
 
@@ -303,12 +340,17 @@ export default function Sandbox(opts = {}) {
         reverse(fakeRestorers);
         forEach(fakeRestorers, function (restorer) {
             restorer();
+            unregisterFakeRestorer(restorer);
         });
         fakeRestorers.length = 0;
 
         reverse(collection);
         applyOnEach(collection, "restore");
-        collection = [];
+        if (sharedState) {
+            collection.length = 0;
+        } else {
+            collection = [];
+        }
     };
 
     sandbox.restoreContext = function restoreContext() {
@@ -346,7 +388,48 @@ export default function Sandbox(opts = {}) {
         return restorer;
     }
 
+    function registerFakeRestorer(restorer) {
+        push(fakeRestorers, restorer);
+
+        const registeredProperties = getRegisteredProperties(
+            replacementRegistry,
+            restorer.object,
+            true,
+        );
+        registeredProperties.set(restorer.property, restorer);
+    }
+
+    function unregisterFakeRestorer(restorer) {
+        const registeredProperties = getRegisteredProperties(
+            replacementRegistry,
+            restorer.object,
+        );
+
+        if (!registeredProperties) {
+            return;
+        }
+
+        registeredProperties.delete(restorer.property);
+
+        if (registeredProperties.size === 0) {
+            replacementRegistry.delete(restorer.object);
+        }
+    }
+
     function verifyNotReplaced(object, property) {
+        const registeredProperties = getRegisteredProperties(
+            replacementRegistry,
+            object,
+        );
+
+        if (registeredProperties && registeredProperties.has(property)) {
+            throw new TypeError(
+                `Attempted to replace ${valueToString(
+                    property,
+                )} which is already replaced`,
+            );
+        }
+
         forEach(fakeRestorers, function (fakeRestorer) {
             if (
                 fakeRestorer.object === object &&
@@ -371,7 +454,7 @@ export default function Sandbox(opts = {}) {
         verifySameType(object, property, replacement);
 
         // store a function for restoring the replaced property
-        push(fakeRestorers, getFakeRestorer(object, property));
+        registerFakeRestorer(getFakeRestorer(object, property));
 
         object[property] = replacement;
 
@@ -391,7 +474,7 @@ export default function Sandbox(opts = {}) {
         verifySameType(object, property, replacement);
 
         // store a function for restoring the replaced property
-        push(fakeRestorers, getFakeRestorer(object, property, true));
+        registerFakeRestorer(getFakeRestorer(object, property, true));
 
         object[property] = replacement;
 
@@ -418,7 +501,7 @@ export default function Sandbox(opts = {}) {
         }
 
         // store a function for restoring the defined property
-        push(fakeRestorers, getFakeRestorer(object, property));
+        registerFakeRestorer(getFakeRestorer(object, property));
 
         Object.defineProperty(object, property, {
             value: value,
@@ -466,7 +549,7 @@ export default function Sandbox(opts = {}) {
         }
 
         // store a function for restoring the replaced property
-        push(fakeRestorers, getFakeRestorer(object, property));
+        registerFakeRestorer(getFakeRestorer(object, property));
 
         // eslint-disable-next-line accessor-pairs
         Object.defineProperty(object, property, {
@@ -514,7 +597,7 @@ export default function Sandbox(opts = {}) {
         }
 
         // store a function for property for restoring the replaced property
-        push(fakeRestorers, getFakeRestorer(object, property));
+        registerFakeRestorer(getFakeRestorer(object, property));
 
         Object.defineProperty(object, property, {
             get: replacement,

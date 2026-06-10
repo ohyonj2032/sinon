@@ -1,0 +1,544 @@
+diff --git a/build.cjs b/build.cjs
+index 07501659..12bc5631 100755
+--- a/build.cjs
++++ b/build.cjs
+@@ -99,7 +99,7 @@ async function buildAll() {
+     );
+ 
+     await makeBundle(
+-        "./lib/sinon-esm.js",
++        "./lib/sinon-esm.mjs",
+         {
+             format: "esm",
+         },
+@@ -107,8 +107,8 @@ async function buildAll() {
+             var intro = "let sinon;\n";
+             // Replace the bundle's own "export default" with a simple assignment to sinon
+             var baseScript = bundle.replace(
+-                /export default [^;]+;/,
+-                "sinon = require_sinon_esm();\nif (sinon.default) sinon = sinon.default;",
++                /export default ([^;]+);/,
++                "sinon = $1;\nif (sinon && sinon.default) sinon = sinon.default;",
+             );
+ 
+             var outro = `\nexport default sinon;\n${Object.keys(sinon)
+diff --git a/rollup.config.mjs b/rollup.config.mjs
+index d6010a8d..41139a2a 100644
+--- a/rollup.config.mjs
++++ b/rollup.config.mjs
+@@ -4,6 +4,14 @@ import json from "@rollup/plugin-json";
+ import fs from "node:fs";
+ import path from "node:path";
+ 
++const projectRoot = process.cwd();
++const sourceRoot = path.resolve(projectRoot, "src");
++const esmProxyEntry = "src/sinon-esm.js";
++
++function normalizeFilePath(filePath) {
++    return path.normalize(filePath).split(path.sep).join("/");
++}
++
+ function getAllFiles(dir, fileList = []) {
+     const files = fs.readdirSync(dir);
+     for (const file of files) {
+@@ -11,68 +19,99 @@ function getAllFiles(dir, fileList = []) {
+         if (fs.statSync(filePath).isDirectory()) {
+             getAllFiles(filePath, fileList);
+         } else if (filePath.endsWith(".js")) {
+-            fileList.push(path.normalize(filePath));
++            fileList.push(normalizeFilePath(filePath));
+         }
+     }
+     return fileList;
+ }
+ 
+-export default {
+-    input: getAllFiles("src"),
+-    output: {
+-        dir: "lib",
+-        format: "cjs",
+-        preserveModules: true,
+-        preserveModulesRoot: "src",
+-        exports: "auto",
+-        interop: "auto",
+-    },
+-    plugins: [nodeResolve(), commonjs(), json()],
+-    external: (id, parentId) => {
++function resolveSourceImport(id, parentId) {
++    if (id.startsWith("src/")) {
++        return path.resolve(projectRoot, id);
++    }
++
++    if (path.isAbsolute(id)) {
++        return id;
++    }
++
++    if (id.startsWith(".")) {
++        return path.resolve(parentId ? path.dirname(parentId) : projectRoot, id);
++    }
++
++    return null;
++}
++
++function sourceFileExists(filePath) {
++    return (
++        fs.existsSync(filePath) ||
++        fs.existsSync(`${filePath}.js`) ||
++        fs.existsSync(`${filePath}.mjs`)
++    );
++}
++
++function createExternalPredicate(options = {}) {
++    const { externalizeSourceInternals = false } = options;
++
++    return function external(id, parentId) {
+         if (id.startsWith("node:")) {
+             return true;
+         }
+ 
+-        // Resolve the path if possible
+-        let resolvedPath;
+-        if (id.startsWith("src/")) {
+-            resolvedPath = path.resolve(process.cwd(), id);
+-        } else if (path.isAbsolute(id)) {
+-            resolvedPath = id;
+-        } else if (id.startsWith(".")) {
+-            resolvedPath = path.resolve(
+-                parentId ? path.dirname(parentId) : ".",
+-                id,
+-            );
+-        } else {
+-            // Named imports (node_modules) are external
++        const resolvedPath = resolveSourceImport(id, parentId);
++        if (!resolvedPath) {
++            return true;
++        }
++
++        if (!resolvedPath.startsWith(sourceRoot)) {
+             return true;
+         }
+ 
+-        const srcPath = path.resolve(process.cwd(), "src");
+-        if (resolvedPath.startsWith(srcPath)) {
+-            // It's inside src/.
+-            // If it's an entry point (no parentId), we must treat it as NOT external.
+-            if (!parentId) {
+-                return false;
+-            }
+-
+-            // For other files, check if they exist in src/
+-            const exists =
+-                fs.existsSync(resolvedPath) ||
+-                fs.existsSync(`${resolvedPath}.js`) ||
+-                fs.existsSync(`${resolvedPath}.mjs`);
+-
+-            if (exists) {
+-                return false;
+-            } // Exists in src/, so transpile it
+-
+-            // Doesn't exist in src/, so it must be a relative import to a file
+-            // that we haven't ported yet, but will exist in lib/.
++        if (!parentId) {
++            return false;
++        }
++
++        if (!sourceFileExists(resolvedPath)) {
+             return true;
+         }
+ 
+-        // Everything else (outside src/) is external
+-        return true;
++        return externalizeSourceInternals;
++    };
++}
++
++const coreInputs = getAllFiles("src").filter(function (filePath) {
++    return filePath !== esmProxyEntry;
++});
++
++const sharedPlugins = [nodeResolve(), json()];
++
++export default [
++    {
++        input: coreInputs,
++        output: {
++            dir: "lib",
++            format: "cjs",
++            preserveModules: true,
++            preserveModulesRoot: "src",
++            exports: "auto",
++            interop: "auto",
++        },
++        plugins: [commonjs(), ...sharedPlugins],
++        external: createExternalPredicate(),
++        preserveEntrySignatures: "exports-only",
++    },
++    {
++        input: esmProxyEntry,
++        output: {
++            file: "lib/sinon-esm.mjs",
++            format: "esm",
++            exports: "named",
++        },
++        plugins: sharedPlugins,
++        external: createExternalPredicate({ externalizeSourceInternals: true }),
++        treeshake: {
++            moduleSideEffects: false,
++            propertyReadSideEffects: false,
++        },
++        preserveEntrySignatures: "strict",
+     },
+-};
++];
+diff --git a/src/create-sinon-api.js b/src/create-sinon-api.js
+index 907d3a91..93df1c3e 100644
+--- a/src/create-sinon-api.js
++++ b/src/create-sinon-api.js
+@@ -16,8 +16,10 @@ import expectation from "./sinon/mock-expectation.js";
+  *
+  * @returns {object} The Sinon API object
+  */
+-export default function createApi() {
+-    const sandbox = new Sandbox();
++export default function createApi(options = {}) {
++    const sandbox = new Sandbox({
++        useGlobalCollection: Boolean(options.useGlobalCollection),
++    });
+ 
+     const apiMethods = {
+         // `createSandbox` returns an isolated sandbox: its fakes are tracked
+diff --git a/src/sinon-esm.js b/src/sinon-esm.js
+index 47bae766..04d66ca4 100644
+--- a/src/sinon-esm.js
++++ b/src/sinon-esm.js
+@@ -1,2 +1,20 @@
+-export { default } from "./sinon.js";
+-export * from "./sinon.js";
++import sinon from "./sinon.js";
++
++const passthroughProxyHandler = {
++    get(target, property, receiver) {
++        return Reflect.get(target, property, receiver);
++    },
++    has(target, property) {
++        return Reflect.has(target, property);
++    },
++    ownKeys(target) {
++        return Reflect.ownKeys(target);
++    },
++    getOwnPropertyDescriptor(target, property) {
++        return Reflect.getOwnPropertyDescriptor(target, property);
++    },
++};
++
++const sinonProxy = new Proxy(sinon, passthroughProxyHandler);
++
++export default sinonProxy;
+diff --git a/src/sinon.js b/src/sinon.js
+index 4f2ad9d7..b1af8e81 100644
+--- a/src/sinon.js
++++ b/src/sinon.js
+@@ -1,5 +1,5 @@
+ import createApi from "./create-sinon-api.js";
+ 
+-const sinon = createApi();
++const sinon = createApi({ useGlobalCollection: true });
+ 
+ export default sinon;
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..9ee75725 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -16,9 +16,42 @@ const { deprecated: logger, valueToString } = commons;
+ const { createMatcher: match } = samsam;
+ 
+ const DEFAULT_LEAK_THRESHOLD = 10000;
++const SHARED_STATE_SYMBOL = Symbol.for("sinon/shared-state");
+ 
+ const filter = arrayProto.filter;
+ 
++function createSharedState() {
++    return {
++        collection: [],
++        fakeRestorers: [],
++        replacementRegistry: new WeakMap(),
++        wrappedMethodRegistry: new WeakMap(),
++    };
++}
++
++function getSharedState() {
++    if (!globalThis[SHARED_STATE_SYMBOL]) {
++        Object.defineProperty(globalThis, SHARED_STATE_SYMBOL, {
++            value: createSharedState(),
++            configurable: true,
++            writable: true,
++        });
++    }
++
++    return globalThis[SHARED_STATE_SYMBOL];
++}
++
++function getRegisteredProperties(registry, object, shouldCreate = false) {
++    let registeredProperties = registry.get(object);
++
++    if (!registeredProperties && shouldCreate) {
++        registeredProperties = new Map();
++        registry.set(object, registeredProperties);
++    }
++
++    return registeredProperties || null;
++}
++
+ /**
+  * @callback RestorerFunction
+  * @returns {void}
+@@ -83,9 +116,13 @@ function checkForValidArguments(descriptor, property, replacement) {
+ export default function Sandbox(opts = {}) {
+     const sandbox = this;
+     const assertOptions = opts.assertOptions || {};
+-    const fakeRestorers = [];
++    const sharedState = opts.useGlobalCollection ? getSharedState() : null;
++    const fakeRestorers = sharedState ? sharedState.fakeRestorers : [];
++    const replacementRegistry = sharedState
++        ? sharedState.replacementRegistry
++        : new WeakMap();
+ 
+-    let collection = [];
++    let collection = sharedState ? sharedState.collection : [];
+     let loggedLeakWarning = false;
+     sandbox.leakThreshold = DEFAULT_LEAK_THRESHOLD;
+ 
+@@ -303,12 +340,17 @@ export default function Sandbox(opts = {}) {
+         reverse(fakeRestorers);
+         forEach(fakeRestorers, function (restorer) {
+             restorer();
++            unregisterFakeRestorer(restorer);
+         });
+         fakeRestorers.length = 0;
+ 
+         reverse(collection);
+         applyOnEach(collection, "restore");
+-        collection = [];
++        if (sharedState) {
++            collection.length = 0;
++        } else {
++            collection = [];
++        }
+     };
+ 
+     sandbox.restoreContext = function restoreContext() {
+@@ -346,7 +388,48 @@ export default function Sandbox(opts = {}) {
+         return restorer;
+     }
+ 
++    function registerFakeRestorer(restorer) {
++        push(fakeRestorers, restorer);
++
++        const registeredProperties = getRegisteredProperties(
++            replacementRegistry,
++            restorer.object,
++            true,
++        );
++        registeredProperties.set(restorer.property, restorer);
++    }
++
++    function unregisterFakeRestorer(restorer) {
++        const registeredProperties = getRegisteredProperties(
++            replacementRegistry,
++            restorer.object,
++        );
++
++        if (!registeredProperties) {
++            return;
++        }
++
++        registeredProperties.delete(restorer.property);
++
++        if (registeredProperties.size === 0) {
++            replacementRegistry.delete(restorer.object);
++        }
++    }
++
+     function verifyNotReplaced(object, property) {
++        const registeredProperties = getRegisteredProperties(
++            replacementRegistry,
++            object,
++        );
++
++        if (registeredProperties && registeredProperties.has(property)) {
++            throw new TypeError(
++                `Attempted to replace ${valueToString(
++                    property,
++                )} which is already replaced`,
++            );
++        }
++
+         forEach(fakeRestorers, function (fakeRestorer) {
+             if (
+                 fakeRestorer.object === object &&
+@@ -371,7 +454,7 @@ export default function Sandbox(opts = {}) {
+         verifySameType(object, property, replacement);
+ 
+         // store a function for restoring the replaced property
+-        push(fakeRestorers, getFakeRestorer(object, property));
++        registerFakeRestorer(getFakeRestorer(object, property));
+ 
+         object[property] = replacement;
+ 
+@@ -391,7 +474,7 @@ export default function Sandbox(opts = {}) {
+         verifySameType(object, property, replacement);
+ 
+         // store a function for restoring the replaced property
+-        push(fakeRestorers, getFakeRestorer(object, property, true));
++        registerFakeRestorer(getFakeRestorer(object, property, true));
+ 
+         object[property] = replacement;
+ 
+@@ -418,7 +501,7 @@ export default function Sandbox(opts = {}) {
+         }
+ 
+         // store a function for restoring the defined property
+-        push(fakeRestorers, getFakeRestorer(object, property));
++        registerFakeRestorer(getFakeRestorer(object, property));
+ 
+         Object.defineProperty(object, property, {
+             value: value,
+@@ -466,7 +549,7 @@ export default function Sandbox(opts = {}) {
+         }
+ 
+         // store a function for restoring the replaced property
+-        push(fakeRestorers, getFakeRestorer(object, property));
++        registerFakeRestorer(getFakeRestorer(object, property));
+ 
+         // eslint-disable-next-line accessor-pairs
+         Object.defineProperty(object, property, {
+@@ -514,7 +597,7 @@ export default function Sandbox(opts = {}) {
+         }
+ 
+         // store a function for property for restoring the replaced property
+-        push(fakeRestorers, getFakeRestorer(object, property));
++        registerFakeRestorer(getFakeRestorer(object, property));
+ 
+         Object.defineProperty(object, property, {
+             get: replacement,
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..6439692f 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -7,6 +7,7 @@ import sinonType from "./sinon-type.js";
+ 
+ const { hasOwnProperty } = prototypes.object;
+ const { push } = prototypes.array;
++const SHARED_STATE_SYMBOL = Symbol.for("sinon/shared-state");
+ 
+ /**
+  * @callback SinonFunction
+@@ -17,6 +18,78 @@ const { push } = prototypes.array;
+ // eslint-disable-next-line no-empty-function
+ const noop = () => {};
+ 
++function createSharedState() {
++    return {
++        collection: [],
++        fakeRestorers: [],
++        replacementRegistry: new WeakMap(),
++        wrappedMethodRegistry: new WeakMap(),
++    };
++}
++
++function getSharedState() {
++    if (!globalThis[SHARED_STATE_SYMBOL]) {
++        Object.defineProperty(globalThis, SHARED_STATE_SYMBOL, {
++            value: createSharedState(),
++            configurable: true,
++            writable: true,
++        });
++    }
++
++    return globalThis[SHARED_STATE_SYMBOL];
++}
++
++function getWrappedTargets(object, property, shouldCreate = false) {
++    const registry = getSharedState().wrappedMethodRegistry;
++    let wrappedProperties = registry.get(object);
++
++    if (!wrappedProperties && shouldCreate) {
++        wrappedProperties = new Map();
++        registry.set(object, wrappedProperties);
++    }
++
++    if (!wrappedProperties) {
++        return null;
++    }
++
++    let wrappedTargets = wrappedProperties.get(property);
++
++    if (!wrappedTargets && shouldCreate) {
++        wrappedTargets = new Set();
++        wrappedProperties.set(property, wrappedTargets);
++    }
++
++    return wrappedTargets || null;
++}
++
++function registerWrappedMethod(object, property, target) {
++    getWrappedTargets(object, property, true).add(target);
++}
++
++function unregisterWrappedMethod(object, property, target) {
++    const registry = getSharedState().wrappedMethodRegistry;
++    const wrappedProperties = registry.get(object);
++
++    if (!wrappedProperties) {
++        return;
++    }
++
++    const wrappedTargets = wrappedProperties.get(property);
++    if (!wrappedTargets) {
++        return;
++    }
++
++    wrappedTargets.delete(target);
++
++    if (wrappedTargets.size === 0) {
++        wrappedProperties.delete(property);
++    }
++
++    if (wrappedProperties.size === 0) {
++        registry.delete(object);
++    }
++}
++
+ function isFunction(obj) {
+     return (
+         typeof obj === "function" ||
+@@ -104,6 +177,11 @@ export default function wrapMethod(object, property, method) {
+     let error, wrappedMethod, i, wrappedMethodDesc, target, accessor;
+ 
+     const wrappedMethods = [];
++    const registeredWrappedTargets = getWrappedTargets(object, property);
++
++    if (registeredWrappedTargets) {
++        registeredWrappedTargets.forEach(checkWrappedMethod);
++    }
+ 
+     function simplePropertyAssignment() {
+         wrappedMethod = object[property];
+@@ -230,6 +308,8 @@ export default function wrapMethod(object, property, method) {
+             // traverse the object in a cleanup phase, ref #2477
+             object[property] = noop;
+         }
++
++        unregisterWrappedMethod(object, property, this);
+     }
+ 
+     function extendObjectWithWrappedMethods() {
+@@ -248,6 +328,8 @@ export default function wrapMethod(object, property, method) {
+             });
+ 
+             target.restore.sinon = true;
++            registerWrappedMethod(object, property, target);
++
+             if (!hasES5Support) {
+                 mirrorProperties(target, wrappedMethod);
+             }

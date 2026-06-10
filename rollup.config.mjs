@@ -4,6 +4,14 @@ import json from "@rollup/plugin-json";
 import fs from "node:fs";
 import path from "node:path";
 
+const projectRoot = process.cwd();
+const sourceRoot = path.resolve(projectRoot, "src");
+const esmProxyEntry = "src/sinon-esm.js";
+
+function normalizeFilePath(filePath) {
+    return path.normalize(filePath).split(path.sep).join("/");
+}
+
 function getAllFiles(dir, fileList = []) {
     const files = fs.readdirSync(dir);
     for (const file of files) {
@@ -11,68 +19,99 @@ function getAllFiles(dir, fileList = []) {
         if (fs.statSync(filePath).isDirectory()) {
             getAllFiles(filePath, fileList);
         } else if (filePath.endsWith(".js")) {
-            fileList.push(path.normalize(filePath));
+            fileList.push(normalizeFilePath(filePath));
         }
     }
     return fileList;
 }
 
-export default {
-    input: getAllFiles("src"),
-    output: {
-        dir: "lib",
-        format: "cjs",
-        preserveModules: true,
-        preserveModulesRoot: "src",
-        exports: "auto",
-        interop: "auto",
-    },
-    plugins: [nodeResolve(), commonjs(), json()],
-    external: (id, parentId) => {
+function resolveSourceImport(id, parentId) {
+    if (id.startsWith("src/")) {
+        return path.resolve(projectRoot, id);
+    }
+
+    if (path.isAbsolute(id)) {
+        return id;
+    }
+
+    if (id.startsWith(".")) {
+        return path.resolve(parentId ? path.dirname(parentId) : projectRoot, id);
+    }
+
+    return null;
+}
+
+function sourceFileExists(filePath) {
+    return (
+        fs.existsSync(filePath) ||
+        fs.existsSync(`${filePath}.js`) ||
+        fs.existsSync(`${filePath}.mjs`)
+    );
+}
+
+function createExternalPredicate(options = {}) {
+    const { externalizeSourceInternals = false } = options;
+
+    return function external(id, parentId) {
         if (id.startsWith("node:")) {
             return true;
         }
 
-        // Resolve the path if possible
-        let resolvedPath;
-        if (id.startsWith("src/")) {
-            resolvedPath = path.resolve(process.cwd(), id);
-        } else if (path.isAbsolute(id)) {
-            resolvedPath = id;
-        } else if (id.startsWith(".")) {
-            resolvedPath = path.resolve(
-                parentId ? path.dirname(parentId) : ".",
-                id,
-            );
-        } else {
-            // Named imports (node_modules) are external
+        const resolvedPath = resolveSourceImport(id, parentId);
+        if (!resolvedPath) {
             return true;
         }
 
-        const srcPath = path.resolve(process.cwd(), "src");
-        if (resolvedPath.startsWith(srcPath)) {
-            // It's inside src/.
-            // If it's an entry point (no parentId), we must treat it as NOT external.
-            if (!parentId) {
-                return false;
-            }
-
-            // For other files, check if they exist in src/
-            const exists =
-                fs.existsSync(resolvedPath) ||
-                fs.existsSync(`${resolvedPath}.js`) ||
-                fs.existsSync(`${resolvedPath}.mjs`);
-
-            if (exists) {
-                return false;
-            } // Exists in src/, so transpile it
-
-            // Doesn't exist in src/, so it must be a relative import to a file
-            // that we haven't ported yet, but will exist in lib/.
+        if (!resolvedPath.startsWith(sourceRoot)) {
             return true;
         }
 
-        // Everything else (outside src/) is external
-        return true;
+        if (!parentId) {
+            return false;
+        }
+
+        if (!sourceFileExists(resolvedPath)) {
+            return true;
+        }
+
+        return externalizeSourceInternals;
+    };
+}
+
+const coreInputs = getAllFiles("src").filter(function (filePath) {
+    return filePath !== esmProxyEntry;
+});
+
+const sharedPlugins = [nodeResolve(), json()];
+
+export default [
+    {
+        input: coreInputs,
+        output: {
+            dir: "lib",
+            format: "cjs",
+            preserveModules: true,
+            preserveModulesRoot: "src",
+            exports: "auto",
+            interop: "auto",
+        },
+        plugins: [commonjs(), ...sharedPlugins],
+        external: createExternalPredicate(),
+        preserveEntrySignatures: "exports-only",
     },
-};
+    {
+        input: esmProxyEntry,
+        output: {
+            file: "lib/sinon-esm.mjs",
+            format: "esm",
+            exports: "named",
+        },
+        plugins: sharedPlugins,
+        external: createExternalPredicate({ externalizeSourceInternals: true }),
+        treeshake: {
+            moduleSideEffects: false,
+            propertyReadSideEffects: false,
+        },
+        preserveEntrySignatures: "strict",
+    },
+];

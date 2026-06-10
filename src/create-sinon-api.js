@@ -16,8 +16,10 @@ import expectation from "./sinon/mock-expectation.js";
  *
  * @returns {object} The Sinon API object
  */
-export default function createApi() {
-    const sandbox = new Sandbox();
+export default function createApi(options = {}) {
+    const sandbox = new Sandbox({
+        useGlobalCollection: Boolean(options.useGlobalCollection),
+    });
 
     const apiMethods = {
         // `createSandbox` returns an isolated sandbox: its fakes are tracked

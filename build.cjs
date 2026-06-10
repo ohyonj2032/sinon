@@ -99,7 +99,7 @@ async function buildAll() {
     );
 
     await makeBundle(
-        "./lib/sinon-esm.js",
+        "./lib/sinon-esm.mjs",
         {
             format: "esm",
         },
@@ -107,8 +107,8 @@ async function buildAll() {
             var intro = "let sinon;\n";
             // Replace the bundle's own "export default" with a simple assignment to sinon
             var baseScript = bundle.replace(
-                /export default [^;]+;/,
-                "sinon = require_sinon_esm();\nif (sinon.default) sinon = sinon.default;",
+                /export default ([^;]+);/,
+                "sinon = $1;\nif (sinon && sinon.default) sinon = sinon.default;",
             );
 
             var outro = `\nexport default sinon;\n${Object.keys(sinon)

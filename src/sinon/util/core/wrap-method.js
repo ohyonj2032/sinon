@@ -7,6 +7,7 @@ import sinonType from "./sinon-type.js";
 
 const { hasOwnProperty } = prototypes.object;
 const { push } = prototypes.array;
+const SHARED_STATE_SYMBOL = Symbol.for("sinon/shared-state");
 
 /**
  * @callback SinonFunction
@@ -16,6 +17,78 @@ const { push } = prototypes.array;
 
 // eslint-disable-next-line no-empty-function
 const noop = () => {};
+
+function createSharedState() {
+    return {
+        collection: [],
+        fakeRestorers: [],
+        replacementRegistry: new WeakMap(),
+        wrappedMethodRegistry: new WeakMap(),
+    };
+}
+
+function getSharedState() {
+    if (!globalThis[SHARED_STATE_SYMBOL]) {
+        Object.defineProperty(globalThis, SHARED_STATE_SYMBOL, {
+            value: createSharedState(),
+            configurable: true,
+            writable: true,
+        });
+    }
+
+    return globalThis[SHARED_STATE_SYMBOL];
+}
+
+function getWrappedTargets(object, property, shouldCreate = false) {
+    const registry = getSharedState().wrappedMethodRegistry;
+    let wrappedProperties = registry.get(object);
+
+    if (!wrappedProperties && shouldCreate) {
+        wrappedProperties = new Map();
+        registry.set(object, wrappedProperties);
+    }
+
+    if (!wrappedProperties) {
+        return null;
+    }
+
+    let wrappedTargets = wrappedProperties.get(property);
+
+    if (!wrappedTargets && shouldCreate) {
+        wrappedTargets = new Set();
+        wrappedProperties.set(property, wrappedTargets);
+    }
+
+    return wrappedTargets || null;
+}
+
+function registerWrappedMethod(object, property, target) {
+    getWrappedTargets(object, property, true).add(target);
+}
+
+function unregisterWrappedMethod(object, property, target) {
+    const registry = getSharedState().wrappedMethodRegistry;
+    const wrappedProperties = registry.get(object);
+
+    if (!wrappedProperties) {
+        return;
+    }
+
+    const wrappedTargets = wrappedProperties.get(property);
+    if (!wrappedTargets) {
+        return;
+    }
+
+    wrappedTargets.delete(target);
+
+    if (wrappedTargets.size === 0) {
+        wrappedProperties.delete(property);
+    }
+
+    if (wrappedProperties.size === 0) {
+        registry.delete(object);
+    }
+}
 
 function isFunction(obj) {
     return (
@@ -104,6 +177,11 @@ export default function wrapMethod(object, property, method) {
     let error, wrappedMethod, i, wrappedMethodDesc, target, accessor;
 
     const wrappedMethods = [];
+    const registeredWrappedTargets = getWrappedTargets(object, property);
+
+    if (registeredWrappedTargets) {
+        registeredWrappedTargets.forEach(checkWrappedMethod);
+    }
 
     function simplePropertyAssignment() {
         wrappedMethod = object[property];
@@ -230,6 +308,8 @@ export default function wrapMethod(object, property, method) {
             // traverse the object in a cleanup phase, ref #2477
             object[property] = noop;
         }
+
+        unregisterWrappedMethod(object, property, this);
     }
 
     function extendObjectWithWrappedMethods() {
@@ -248,6 +328,8 @@ export default function wrapMethod(object, property, method) {
             });
 
             target.restore.sinon = true;
+            registerWrappedMethod(object, property, target);
+
             if (!hasES5Support) {
                 mirrorProperties(target, wrappedMethod);
             }
