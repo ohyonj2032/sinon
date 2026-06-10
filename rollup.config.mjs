@@ -17,23 +17,12 @@ function getAllFiles(dir, fileList = []) {
     return fileList;
 }
 
-export default {
-    input: getAllFiles("src"),
-    output: {
-        dir: "lib",
-        format: "cjs",
-        preserveModules: true,
-        preserveModulesRoot: "src",
-        exports: "auto",
-        interop: "auto",
-    },
-    plugins: [nodeResolve(), commonjs(), json()],
-    external: (id, parentId) => {
+function makeExternal() {
+    return (id, parentId) => {
         if (id.startsWith("node:")) {
             return true;
         }
 
-        // Resolve the path if possible
         let resolvedPath;
         if (id.startsWith("src/")) {
             resolvedPath = path.resolve(process.cwd(), id);
@@ -45,19 +34,15 @@ export default {
                 id,
             );
         } else {
-            // Named imports (node_modules) are external
             return true;
         }
 
         const srcPath = path.resolve(process.cwd(), "src");
         if (resolvedPath.startsWith(srcPath)) {
-            // It's inside src/.
-            // If it's an entry point (no parentId), we must treat it as NOT external.
             if (!parentId) {
                 return false;
             }
 
-            // For other files, check if they exist in src/
             const exists =
                 fs.existsSync(resolvedPath) ||
                 fs.existsSync(`${resolvedPath}.js`) ||
@@ -65,14 +50,101 @@ export default {
 
             if (exists) {
                 return false;
-            } // Exists in src/, so transpile it
+            }
 
-            // Doesn't exist in src/, so it must be a relative import to a file
-            // that we haven't ported yet, but will exist in lib/.
             return true;
         }
 
-        // Everything else (outside src/) is external
         return true;
+    };
+}
+
+const cjsCoreConfig = {
+    input: getAllFiles("src").filter(
+        (f) => !f.includes(path.normalize("src/sinon-esm.js")),
+    ),
+    output: {
+        dir: "lib",
+        format: "cjs",
+        preserveModules: true,
+        preserveModulesRoot: "src",
+        exports: "named",
+        interop: "auto",
+    },
+    plugins: [
+        nodeResolve({
+            moduleSideEffects: (id) => {
+                if (id.includes("shared-state")) {
+                    return true;
+                }
+                if (id.includes("proxy-invoke") || id.includes("proxy-call")) {
+                    return false;
+                }
+                return true;
+            },
+        }),
+        commonjs(),
+        json(),
+    ],
+    external: makeExternal(),
+};
+
+const esmProxyConfig = {
+    input: "src/sinon-esm.js",
+    output: {
+        dir: "pkg",
+        format: "esm",
+        exports: "named",
+        entryFileNames: "sinon-esm.js",
+    },
+    plugins: [
+        nodeResolve({
+            moduleSideEffects: (id, external) => {
+                if (external) {
+                    return false;
+                }
+                if (
+                    id.includes("sinon-esm") ||
+                    id.includes("proxy-invoke") ||
+                    id.includes("proxy-call") ||
+                    id.includes("proxy-call-util") ||
+                    id.includes("spy-formatters") ||
+                    id.includes("colorizer")
+                ) {
+                    return false;
+                }
+                if (
+                    id.includes("shared-state") ||
+                    id.includes("sandbox") ||
+                    id.includes("wrap-method")
+                ) {
+                    return true;
+                }
+                return true;
+            },
+        }),
+        commonjs(),
+        json(),
+    ],
+    external: (id, parentId) => {
+        if (id.startsWith("node:")) {
+            return true;
+        }
+        if (id.startsWith("@sinonjs/")) {
+            return true;
+        }
+        if (id === "util") {
+            return true;
+        }
+        if (
+            parentId &&
+            parentId.includes("sinon-esm") &&
+            (id.startsWith("./sinon/") || id === "./sinon.js")
+        ) {
+            return true;
+        }
+        return false;
     },
 };
+
+export default [cjsCoreConfig, esmProxyConfig];

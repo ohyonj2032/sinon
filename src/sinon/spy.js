@@ -7,19 +7,20 @@ import isEsModule from "./util/core/is-es-module.js";
 import * as proxyCallUtil from "./proxy-call-util.js";
 import walkObject from "./util/core/walk-object.js";
 import wrapMethod from "./util/core/wrap-method.js";
+import getSharedState from "./util/core/shared-state.js";
 
 const { prototypes, functionName, valueToString } = commons;
 const { deepEqual } = samsam;
 const { forEach, pop, push, slice } = prototypes.array;
 const filter = Array.prototype.filter;
 
+const shared = getSharedState();
+
 /**
  * @callback SinonFunction
  * @param {...unknown} args
  * @returns {unknown}
  */
-
-let uuid = 0;
 
 function matches(fake, args, strict) {
     const margs = fake.matchingArguments;
@@ -149,7 +150,7 @@ function createSpy(func) {
         displayName: name || "spy",
         fakes: [],
         instantiateFake: createSpy,
-        id: `spy#${uuid++}`,
+        id: `spy#${shared.spyUuid++}`,
     });
     return proxy;
 }

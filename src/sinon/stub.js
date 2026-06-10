@@ -11,6 +11,7 @@ import sinonType from "./util/core/sinon-type.js";
 import wrapMethod from "./util/core/wrap-method.js";
 import throwOnFalsyObject from "./throw-on-falsy-object.js";
 import walkObject from "./util/core/walk-object.js";
+import getSharedState from "./util/core/shared-state.js";
 
 const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
 const { array: arrayProto, object: objectProto } = commonsPrototypes;
@@ -21,7 +22,7 @@ const pop = arrayProto.pop;
 const slice = arrayProto.slice;
 const sort = arrayProto.sort;
 
-let uuid = 0;
+const shared = getSharedState();
 
 function createStub(originalFunc) {
     // eslint-disable-next-line prefer-const
@@ -55,7 +56,7 @@ function createStub(originalFunc) {
         displayName: name || "stub",
         defaultBehavior: null,
         behaviors: [],
-        id: `stub#${uuid++}`,
+        id: `stub#${shared.stubUuid++}`,
     });
 
     sinonType.set(proxy, "stub");

@@ -4,9 +4,12 @@ const { prototypes, valueToString } = commons;
 import getPropertyDescriptor from "./get-property-descriptor.js";
 import extend from "./extend.js";
 import sinonType from "./sinon-type.js";
+import getSharedState from "./shared-state.js";
 
 const { hasOwnProperty } = prototypes.object;
 const { push } = prototypes.array;
+
+const shared = getSharedState();
 
 /**
  * @callback SinonFunction
@@ -78,6 +81,12 @@ export default function wrapMethod(object, property, method) {
                     property,
                 )} as function`,
             );
+        } else if (shared.wrapStateRegistry.has(wrappedMethod)) {
+            error = new TypeError(
+                `Attempted to wrap ${valueToString(
+                    property,
+                )} which is already wrapped`,
+            );
         } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
             error = new TypeError(
                 `Attempted to wrap ${valueToString(
@@ -125,6 +134,10 @@ export default function wrapMethod(object, property, method) {
         if (!wrappedMethodDesc) {
             error = new TypeError(
                 `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
+            );
+        } else if (shared.wrapStateRegistry.has(wrappedMethodDesc)) {
+            error = new TypeError(
+                `Attempted to wrap ${property} which is already wrapped`,
             );
         } else if (
             wrappedMethodDesc.restore &&
@@ -230,6 +243,8 @@ export default function wrapMethod(object, property, method) {
             // traverse the object in a cleanup phase, ref #2477
             object[property] = noop;
         }
+
+        shared.wrapStateRegistry.delete(method);
     }
 
     function extendObjectWithWrappedMethods() {
@@ -255,6 +270,12 @@ export default function wrapMethod(object, property, method) {
     }
 
     extendObjectWithWrappedMethods();
+
+    shared.wrapStateRegistry.set(method, {
+        object: object,
+        property: property,
+        wrappedMethods: wrappedMethods,
+    });
 
     return method;
 }

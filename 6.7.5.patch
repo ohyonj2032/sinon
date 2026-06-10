@@ -1,0 +1,407 @@
+diff --git a/rollup.config.mjs b/rollup.config.mjs
+index d6010a8d..394053c2 100644
+--- a/rollup.config.mjs
++++ b/rollup.config.mjs
+@@ -17,23 +17,12 @@ function getAllFiles(dir, fileList = []) {
+     return fileList;
+ }
+ 
+-export default {
+-    input: getAllFiles("src"),
+-    output: {
+-        dir: "lib",
+-        format: "cjs",
+-        preserveModules: true,
+-        preserveModulesRoot: "src",
+-        exports: "auto",
+-        interop: "auto",
+-    },
+-    plugins: [nodeResolve(), commonjs(), json()],
+-    external: (id, parentId) => {
++function makeExternal() {
++    return (id, parentId) => {
+         if (id.startsWith("node:")) {
+             return true;
+         }
+ 
+-        // Resolve the path if possible
+         let resolvedPath;
+         if (id.startsWith("src/")) {
+             resolvedPath = path.resolve(process.cwd(), id);
+@@ -45,19 +34,15 @@ export default {
+                 id,
+             );
+         } else {
+-            // Named imports (node_modules) are external
+             return true;
+         }
+ 
+         const srcPath = path.resolve(process.cwd(), "src");
+         if (resolvedPath.startsWith(srcPath)) {
+-            // It's inside src/.
+-            // If it's an entry point (no parentId), we must treat it as NOT external.
+             if (!parentId) {
+                 return false;
+             }
+ 
+-            // For other files, check if they exist in src/
+             const exists =
+                 fs.existsSync(resolvedPath) ||
+                 fs.existsSync(`${resolvedPath}.js`) ||
+@@ -65,14 +50,101 @@ export default {
+ 
+             if (exists) {
+                 return false;
+-            } // Exists in src/, so transpile it
++            }
+ 
+-            // Doesn't exist in src/, so it must be a relative import to a file
+-            // that we haven't ported yet, but will exist in lib/.
+             return true;
+         }
+ 
+-        // Everything else (outside src/) is external
+         return true;
++    };
++}
++
++const cjsCoreConfig = {
++    input: getAllFiles("src").filter(
++        (f) => !f.includes(path.normalize("src/sinon-esm.js")),
++    ),
++    output: {
++        dir: "lib",
++        format: "cjs",
++        preserveModules: true,
++        preserveModulesRoot: "src",
++        exports: "named",
++        interop: "auto",
+     },
++    plugins: [
++        nodeResolve({
++            moduleSideEffects: (id) => {
++                if (id.includes("shared-state")) {
++                    return true;
++                }
++                if (id.includes("proxy-invoke") || id.includes("proxy-call")) {
++                    return false;
++                }
++                return true;
++            },
++        }),
++        commonjs(),
++        json(),
++    ],
++    external: makeExternal(),
+ };
++
++const esmProxyConfig = {
++    input: "src/sinon-esm.js",
++    output: {
++        dir: "pkg",
++        format: "esm",
++        exports: "named",
++        entryFileNames: "sinon-esm.js",
++    },
++    plugins: [
++        nodeResolve({
++            moduleSideEffects: (id, external) => {
++                if (external) {
++                    return false;
++                }
++                if (
++                    id.includes("sinon-esm") ||
++                    id.includes("proxy-invoke") ||
++                    id.includes("proxy-call") ||
++                    id.includes("proxy-call-util") ||
++                    id.includes("spy-formatters") ||
++                    id.includes("colorizer")
++                ) {
++                    return false;
++                }
++                if (
++                    id.includes("shared-state") ||
++                    id.includes("sandbox") ||
++                    id.includes("wrap-method")
++                ) {
++                    return true;
++                }
++                return true;
++            },
++        }),
++        commonjs(),
++        json(),
++    ],
++    external: (id, parentId) => {
++        if (id.startsWith("node:")) {
++            return true;
++        }
++        if (id.startsWith("@sinonjs/")) {
++            return true;
++        }
++        if (id === "util") {
++            return true;
++        }
++        if (
++            parentId &&
++            parentId.includes("sinon-esm") &&
++            (id.startsWith("./sinon/") || id === "./sinon.js")
++        ) {
++            return true;
++        }
++        return false;
++    },
++};
++
++export default [cjsCoreConfig, esmProxyConfig];
+diff --git a/src/sinon-esm.js b/src/sinon-esm.js
+index 47bae766..b798d2d1 100644
+--- a/src/sinon-esm.js
++++ b/src/sinon-esm.js
+@@ -1,2 +1,30 @@
+-export { default } from "./sinon.js";
+-export * from "./sinon.js";
++import getSharedState from "./sinon/util/core/shared-state.js";
++import createApi from "./create-sinon-api.js";
++
++const shared = getSharedState();
++
++const GLOBAL_SANDBOX_KEY = Symbol.for("@sinonjs/default-sandbox");
++
++function getDefaultSandbox() {
++    if (!globalThis[GLOBAL_SANDBOX_KEY]) {
++        globalThis[GLOBAL_SANDBOX_KEY] = createApi();
++    }
++    return globalThis[GLOBAL_SANDBOX_KEY];
++}
++
++let sinon;
++
++try {
++    const { createRequire } = await import("node:module");
++    const require = createRequire(import.meta.url);
++    const cjsSinon = require("../lib/sinon.js");
++    sinon = cjsSinon.default || cjsSinon;
++} catch {
++    sinon = getDefaultSandbox();
++}
++
++if (!sinon || typeof sinon.spy !== "function") {
++    sinon = getDefaultSandbox();
++}
++
++export default sinon;
+diff --git a/src/sinon/proxy-invoke.js b/src/sinon/proxy-invoke.js
+index 8a7433ab..03aa68ee 100644
+--- a/src/sinon/proxy-invoke.js
++++ b/src/sinon/proxy-invoke.js
+@@ -2,12 +2,14 @@ import commons from "@sinonjs/commons";
+ 
+ const { prototypes } = commons;
+ import * as proxyCallUtil from "./proxy-call-util.js";
++import getSharedState from "./util/core/shared-state.js";
+ 
+ const { push, forEach, concat } = prototypes.array;
+ const ErrorConstructor = Error.prototype.constructor;
+ const { bind } = Function.prototype;
+ 
+-let callId = 0;
++const shared = getSharedState();
++
+ const maxSafeInteger = Number.MAX_SAFE_INTEGER;
+ 
+ /**
+@@ -26,8 +28,8 @@ const maxSafeInteger = Number.MAX_SAFE_INTEGER;
+  */
+ export default function invoke(func, thisValue, args) {
+     const matchings = this.matchingFakes(args);
+-    const currentCallId = callId;
+-    callId = callId >= maxSafeInteger ? 0 : callId + 1;
++    const currentCallId = shared.callId;
++    shared.callId = shared.callId >= maxSafeInteger ? 0 : shared.callId + 1;
+     let exception, returnValue;
+ 
+     proxyCallUtil.incrementCallCount(this);
+diff --git a/src/sinon/sandbox.js b/src/sinon/sandbox.js
+index 2ebc5e16..92db0f8b 100644
+--- a/src/sinon/sandbox.js
++++ b/src/sinon/sandbox.js
+@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
+ import sinonCreateStubInstance from "./create-stub-instance.js";
+ import sinonFake from "./fake.js";
+ import extend from "./util/core/extend.js";
++import getSharedState from "./util/core/shared-state.js";
+ 
+ const { array: arrayProto } = commons.prototypes;
+ const { deprecated: logger, valueToString } = commons;
+@@ -73,6 +74,31 @@ function checkForValidArguments(descriptor, property, replacement) {
+     }
+ }
+ 
++const shared = getSharedState();
++
++const SANDBOX_REGISTRY_KEY = Symbol.for("@sinonjs/sandbox-instances");
++
++function getSandboxRegistry() {
++    if (!globalThis[SANDBOX_REGISTRY_KEY]) {
++        globalThis[SANDBOX_REGISTRY_KEY] = new WeakMap();
++    }
++    return globalThis[SANDBOX_REGISTRY_KEY];
++}
++
++function registerSandbox(sandbox) {
++    const registry = getSandboxRegistry();
++    registry.set(sandbox, {
++        fakes: sandbox.getFakes(),
++        createdAt: Date.now(),
++    });
++    shared.sandboxRegistry.set(sandbox, true);
++}
++
++function isSandboxRegistered(sandbox) {
++    const registry = getSandboxRegistry();
++    return registry.has(sandbox) || shared.sandboxRegistry.has(sandbox);
++}
++
+ /**
+  * Creates a sandbox.
+  *
+@@ -574,6 +600,8 @@ export default function Sandbox(opts = {}) {
+     addFakeBehaviorToCollection("rejects");
+     addFakeBehaviorToCollection("yields");
+     addFakeBehaviorToCollection("yieldsAsync");
++
++    registerSandbox(sandbox);
+ }
+ 
+ Sandbox.prototype.match = match;
+diff --git a/src/sinon/spy.js b/src/sinon/spy.js
+index 9c57ff50..d3aef766 100644
+--- a/src/sinon/spy.js
++++ b/src/sinon/spy.js
+@@ -7,20 +7,21 @@ import isEsModule from "./util/core/is-es-module.js";
+ import * as proxyCallUtil from "./proxy-call-util.js";
+ import walkObject from "./util/core/walk-object.js";
+ import wrapMethod from "./util/core/wrap-method.js";
++import getSharedState from "./util/core/shared-state.js";
+ 
+ const { prototypes, functionName, valueToString } = commons;
+ const { deepEqual } = samsam;
+ const { forEach, pop, push, slice } = prototypes.array;
+ const filter = Array.prototype.filter;
+ 
++const shared = getSharedState();
++
+ /**
+  * @callback SinonFunction
+  * @param {...unknown} args
+  * @returns {unknown}
+  */
+ 
+-let uuid = 0;
+-
+ function matches(fake, args, strict) {
+     const margs = fake.matchingArguments;
+     if (
+@@ -149,7 +150,7 @@ function createSpy(func) {
+         displayName: name || "spy",
+         fakes: [],
+         instantiateFake: createSpy,
+-        id: `spy#${uuid++}`,
++        id: `spy#${shared.spyUuid++}`,
+     });
+     return proxy;
+ }
+diff --git a/src/sinon/stub.js b/src/sinon/stub.js
+index 4e84ed23..d5b97c95 100644
+--- a/src/sinon/stub.js
++++ b/src/sinon/stub.js
+@@ -11,6 +11,7 @@ import sinonType from "./util/core/sinon-type.js";
+ import wrapMethod from "./util/core/wrap-method.js";
+ import throwOnFalsyObject from "./throw-on-falsy-object.js";
+ import walkObject from "./util/core/walk-object.js";
++import getSharedState from "./util/core/shared-state.js";
+ 
+ const { prototypes: commonsPrototypes, functionName, valueToString } = commons;
+ const { array: arrayProto, object: objectProto } = commonsPrototypes;
+@@ -21,7 +22,7 @@ const pop = arrayProto.pop;
+ const slice = arrayProto.slice;
+ const sort = arrayProto.sort;
+ 
+-let uuid = 0;
++const shared = getSharedState();
+ 
+ function createStub(originalFunc) {
+     // eslint-disable-next-line prefer-const
+@@ -55,7 +56,7 @@ function createStub(originalFunc) {
+         displayName: name || "stub",
+         defaultBehavior: null,
+         behaviors: [],
+-        id: `stub#${uuid++}`,
++        id: `stub#${shared.stubUuid++}`,
+     });
+ 
+     sinonType.set(proxy, "stub");
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..3e0b8a5f 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -4,10 +4,13 @@ const { prototypes, valueToString } = commons;
+ import getPropertyDescriptor from "./get-property-descriptor.js";
+ import extend from "./extend.js";
+ import sinonType from "./sinon-type.js";
++import getSharedState from "./shared-state.js";
+ 
+ const { hasOwnProperty } = prototypes.object;
+ const { push } = prototypes.array;
+ 
++const shared = getSharedState();
++
+ /**
+  * @callback SinonFunction
+  * @param {...unknown} args
+@@ -78,6 +81,12 @@ export default function wrapMethod(object, property, method) {
+                     property,
+                 )} as function`,
+             );
++        } else if (shared.wrapStateRegistry.has(wrappedMethod)) {
++            error = new TypeError(
++                `Attempted to wrap ${valueToString(
++                    property,
++                )} which is already wrapped`,
++            );
+         } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
+             error = new TypeError(
+                 `Attempted to wrap ${valueToString(
+@@ -126,6 +135,10 @@ export default function wrapMethod(object, property, method) {
+             error = new TypeError(
+                 `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
+             );
++        } else if (shared.wrapStateRegistry.has(wrappedMethodDesc)) {
++            error = new TypeError(
++                `Attempted to wrap ${property} which is already wrapped`,
++            );
+         } else if (
+             wrappedMethodDesc.restore &&
+             wrappedMethodDesc.restore.sinon
+@@ -230,6 +243,8 @@ export default function wrapMethod(object, property, method) {
+             // traverse the object in a cleanup phase, ref #2477
+             object[property] = noop;
+         }
++
++        shared.wrapStateRegistry.delete(method);
+     }
+ 
+     function extendObjectWithWrappedMethods() {
+@@ -256,5 +271,11 @@ export default function wrapMethod(object, property, method) {
+ 
+     extendObjectWithWrappedMethods();
+ 
++    shared.wrapStateRegistry.set(method, {
++        object: object,
++        property: property,
++        wrappedMethods: wrappedMethods,
++    });
++
+     return method;
+ }

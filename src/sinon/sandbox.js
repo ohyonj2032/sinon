@@ -10,6 +10,7 @@ import sinonStub from "./stub.js";
 import sinonCreateStubInstance from "./create-stub-instance.js";
 import sinonFake from "./fake.js";
 import extend from "./util/core/extend.js";
+import getSharedState from "./util/core/shared-state.js";
 
 const { array: arrayProto } = commons.prototypes;
 const { deprecated: logger, valueToString } = commons;
@@ -71,6 +72,31 @@ function checkForValidArguments(descriptor, property, replacement) {
     if (typeof replacement === "undefined") {
         throw new TypeError("Expected replacement argument to be defined");
     }
+}
+
+const shared = getSharedState();
+
+const SANDBOX_REGISTRY_KEY = Symbol.for("@sinonjs/sandbox-instances");
+
+function getSandboxRegistry() {
+    if (!globalThis[SANDBOX_REGISTRY_KEY]) {
+        globalThis[SANDBOX_REGISTRY_KEY] = new WeakMap();
+    }
+    return globalThis[SANDBOX_REGISTRY_KEY];
+}
+
+function registerSandbox(sandbox) {
+    const registry = getSandboxRegistry();
+    registry.set(sandbox, {
+        fakes: sandbox.getFakes(),
+        createdAt: Date.now(),
+    });
+    shared.sandboxRegistry.set(sandbox, true);
+}
+
+function isSandboxRegistered(sandbox) {
+    const registry = getSandboxRegistry();
+    return registry.has(sandbox) || shared.sandboxRegistry.has(sandbox);
 }
 
 /**
@@ -574,6 +600,8 @@ export default function Sandbox(opts = {}) {
     addFakeBehaviorToCollection("rejects");
     addFakeBehaviorToCollection("yields");
     addFakeBehaviorToCollection("yieldsAsync");
+
+    registerSandbox(sandbox);
 }
 
 Sandbox.prototype.match = match;
