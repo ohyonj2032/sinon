@@ -1,0 +1,64 @@
+diff --git a/src/sinon/proxy.js b/src/sinon/proxy.js
+index c61876ec..8bfae34f 100644
+--- a/src/sinon/proxy.js
++++ b/src/sinon/proxy.js
+@@ -384,9 +384,58 @@ export default function createProxy(func, originalFunc) {
+     // Inherit function properties:
+     extend(proxy, func);
+ 
+-    proxy.prototype = func.prototype;
++    proxy.prototype = (originalFunc || func).prototype;
+ 
+     extend.nonEnum(proxy, proxyApi);
+ 
++    if (typeof Proxy === "function" && typeof originalFunc === "function") {
++        return new Proxy(originalFunc, {
++            get: function get(target, prop, receiver) {
++                if (prop in proxy) {
++                    return proxy[prop];
++                }
++                return Reflect.get(target, prop, receiver);
++            },
++            set: function set(target, prop, value, receiver) {
++                if (prop in proxy) {
++                    proxy[prop] = value;
++                    return true;
++                }
++                return Reflect.set(target, prop, value, receiver);
++            },
++            apply: function apply(target, thisArg, args) {
++                return proxy.invoke(func, thisArg, args);
++            },
++            construct: function construct(target, args, newTarget) {
++                const proto = (newTarget || target).prototype;
++                const thisValue = Object.create(proto !== null && typeof proto === "object" ? proto : null);
++                
++                const originalProto = Object.getPrototypeOf(thisValue);
++                const proxyProto = proxy.prototype !== null && typeof proxy.prototype === "object" ? proxy.prototype : null;
++                Object.setPrototypeOf(thisValue, proxyProto);
++                
++                let returnValue;
++                try {
++                    returnValue = proxy.invoke(func, thisValue, args);
++                } finally {
++                    if (Object.getPrototypeOf(thisValue) === proxyProto) {
++                        Object.setPrototypeOf(thisValue, originalProto);
++                    }
++                }
++                
++                if (typeof returnValue === "object" && returnValue !== null) {
++                    if (Object.getPrototypeOf(returnValue) === func.prototype) {
++                        Object.setPrototypeOf(returnValue, originalProto);
++                    }
++                    return returnValue;
++                }
++                if (typeof returnValue === "function") {
++                    return returnValue;
++                }
++                return thisValue;
++            }
++        });
++    }
++
+     return proxy;
+ }
