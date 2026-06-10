@@ -164,7 +164,10 @@ function createSpy(func) {
  */
 export default function spy(object, property, types) {
     if (isEsModule(object)) {
-        throw new TypeError("ES Modules cannot be spied");
+        throw new TypeError(
+            "ES Modules cannot be spied directly. " +
+                "Use `sinon.createEsModuleProxy(module)` to create a wrappable proxy first.",
+        );
     }
 
     if (!property && typeof object === "function") {

@@ -10,6 +10,7 @@ import promise from "./sinon/promise.js";
 import samsam from "@sinonjs/samsam";
 import restoreObject from "./sinon/restore-object.js";
 import expectation from "./sinon/mock-expectation.js";
+import { createEsModuleProxy } from "./sinon/proxy.js";
 
 /**
  * Creates the Sinon API.
@@ -45,6 +46,7 @@ export default function createApi() {
         },
 
         promise: promise,
+        createEsModuleProxy: createEsModuleProxy,
     };
 
     Object.defineProperty(apiMethods.createSandbox, "name", {

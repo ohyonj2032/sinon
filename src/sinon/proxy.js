@@ -384,9 +384,85 @@ export default function createProxy(func, originalFunc) {
     // Inherit function properties:
     extend(proxy, func);
 
-    proxy.prototype = func.prototype;
+    proxy.prototype = originalFunc.prototype;
 
     extend.nonEnum(proxy, proxyApi);
 
     return proxy;
+}
+
+/**
+ * Wraps an ES module namespace object in a Proxy with a `get` trap,
+ * allowing Sinon stubs and spies to intercept named exports from
+ * sealed module namespace objects.
+ *
+ * The returned Proxy intercepts property access via the `get` trap:
+ * - Stubbed properties return the stub function (which supports `new`
+ *   for constructor exports, `typeof`, `instanceof`, and all other
+ *   operations).
+ * - Unstubbed properties delegate to the original module namespace.
+ *
+ * The Proxy also provides `defineProperty` and `deleteProperty` traps
+ * so that `sinon.stub(proxy, "exportName")` and `.restore()` work
+ * transparently with Sinon's `wrapMethod` mechanism.
+ *
+ * @param {object} module An ES module namespace object (from `import * as`)
+ * @returns {Proxy} A Proxy wrapping the module namespace
+ */
+export function createEsModuleProxy(module) {
+    const stubMap = new Map();
+
+    return new Proxy(module, {
+        get(target, prop, receiver) {
+            if (stubMap.has(prop)) {
+                return stubMap.get(prop);
+            }
+            return Reflect.get(target, prop, receiver);
+        },
+
+        defineProperty(target, prop, descriptor) {
+            if ("value" in descriptor) {
+                stubMap.set(prop, descriptor.value);
+            }
+            return true;
+        },
+
+        deleteProperty(target, prop) {
+            stubMap.delete(prop);
+            return true;
+        },
+
+        getOwnPropertyDescriptor(target, prop) {
+            if (stubMap.has(prop)) {
+                return {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: stubMap.get(prop),
+                };
+            }
+            return Reflect.getOwnPropertyDescriptor(target, prop);
+        },
+
+        has(target, prop) {
+            if (stubMap.has(prop)) {
+                return true;
+            }
+            return Reflect.has(target, prop);
+        },
+
+        ownKeys(target) {
+            const keys = Reflect.ownKeys(target);
+            for (const key of stubMap.keys()) {
+                if (keys.indexOf(key) === -1) {
+                    keys.push(key);
+                }
+            }
+            return keys;
+        },
+
+        isExtensible(target) {
+            return true;
+        },
+    });
 }

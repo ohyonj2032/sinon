@@ -42,6 +42,10 @@ function createStub(originalFunc) {
         return getCurrentBehavior(fnStub).invoke(this, arguments);
     }
 
+    if (originalFunc) {
+        functionStub.prototype = originalFunc.prototype;
+    }
+
     proxy = createProxy(functionStub, originalFunc || functionStub);
     // Inherit spy API:
     extend.nonEnum(proxy, spy);
@@ -71,7 +75,10 @@ export default function stub(object, property) {
     }
 
     if (isEsModule(object)) {
-        throw new TypeError("ES Modules cannot be stubbed");
+        throw new TypeError(
+            "ES Modules cannot be stubbed directly. " +
+                "Use `sinon.createEsModuleProxy(module)` to create a wrappable proxy first.",
+        );
     }
 
     throwOnFalsyObject.apply(null, arguments);

@@ -3,9 +3,8 @@ import commons from "@sinonjs/commons";
 const { prototypes } = commons;
 import * as proxyCallUtil from "./proxy-call-util.js";
 
-const { push, forEach, concat } = prototypes.array;
+const { push, forEach } = prototypes.array;
 const ErrorConstructor = Error.prototype.constructor;
-const { bind } = Function.prototype;
 
 let callId = 0;
 const maxSafeInteger = Number.MAX_SAFE_INTEGER;
@@ -51,11 +50,7 @@ export default function invoke(func, thisValue, args) {
         const thisCall = this.getCall(this.callCount - 1);
 
         if (thisCall.calledWithNew()) {
-            // Call through with `new`
-            returnValue = new (bind.apply(
-                this.func || func,
-                concat([thisValue], args),
-            ))();
+            returnValue = (this.func || func).apply(thisValue, args);
 
             if (
                 typeof returnValue !== "object" &&
