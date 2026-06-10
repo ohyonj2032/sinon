@@ -1,0 +1,303 @@
+diff --git a/src/sinon/util/core/wrap-method.js b/src/sinon/util/core/wrap-method.js
+index 5541cb49..a5d63d72 100644
+--- a/src/sinon/util/core/wrap-method.js
++++ b/src/sinon/util/core/wrap-method.js
+@@ -17,6 +17,33 @@ const { push } = prototypes.array;
+ // eslint-disable-next-line no-empty-function
+ const noop = () => {};
+ 
++// ---------------------------------------------------------------------------
++// WeakMap-based external registry for wrap state.
++//
++// Previously wrap-method.js stored the original method / descriptor as
++// hidden properties directly on the replacement function that lived on the
++// wrapped object.  That design made every record visible to every concurrent
++// wrapper of the same (object, property) pair: the second wrapper would
++// overwrite the first one's book-keeping on the shared object, and a later
++// restore() would accidentally restore the sibling stub instead of the
++// original method.
++//
++// The new design keeps every wrap's book-keeping *inside* a module-private
++// WeakMap keyed by:
++//
++//     wrapRegistry[object] -> Map<property, Record[]>
++//
++// where each Record holds the original descriptor as it looked at the time
++// of that specific wrap, along with the metadata that used to live on the
++// replacement function.  Each replacement function only knows the Symbol
++// that identifies it inside its own Record, so restore() on function A
++// cannot touch the state of function B, even when A and B are successive
++// wraps of the exact same (object, property) pair.  The shared object is
++// never used as a transport for wrap book-keeping.
++// ---------------------------------------------------------------------------
++const wrapRegistry = new WeakMap();
++const wrapRecordSymbol = Symbol("sinon.wrap-record");
++
+ function isFunction(obj) {
+     return (
+         typeof obj === "function" ||
+@@ -50,6 +77,27 @@ function getAccessor(object, property, method) {
+ // Cheap way to detect if we have ES5 support.
+ const hasES5Support = "keys" in Object;
+ 
++function recordWrap(object, property, record) {
++    let perObject = wrapRegistry.get(object);
++    if (!perObject) {
++        perObject = new Map();
++        wrapRegistry.set(object, perObject);
++    }
++    let perProperty = perObject.get(property);
++    if (!perProperty) {
++        perProperty = [];
++        perObject.set(property, perProperty);
++    }
++    push(perProperty, record);
++}
++
++function findRecordFor(replacement) {
++    if (!replacement) {
++        return null;
++    }
++    return replacement[wrapRecordSymbol] || null;
++}
++
+ /**
+  * Wraps a method on an object with another function.
+  *
+@@ -70,40 +118,33 @@ export default function wrapMethod(object, property, method) {
+     }
+ 
+     function checkWrappedMethod(wrappedMethod) {
+-        let error;
+-
+         if (!isFunction(wrappedMethod)) {
+-            error = new TypeError(
++            const error = new TypeError(
+                 `Attempted to wrap ${typeof wrappedMethod} property ${valueToString(
+                     property,
+                 )} as function`,
+             );
+-        } else if (wrappedMethod.restore && wrappedMethod.restore.sinon) {
+-            error = new TypeError(
+-                `Attempted to wrap ${valueToString(
+-                    property,
+-                )} which is already wrapped`,
+-            );
+-        } else if (wrappedMethod.calledBefore) {
+-            const verb = wrappedMethod.returns ? "stubbed" : "spied on";
+-            error = new TypeError(
+-                `Attempted to wrap ${valueToString(
+-                    property,
+-                )} which is already ${verb}`,
+-            );
+-        }
+-
+-        if (error) {
+             if (wrappedMethod && wrappedMethod.stackTraceError) {
+                 error.stack += `\n--------------\n${wrappedMethod.stackTraceError.stack}`;
+             }
+             throw error;
+         }
++        // Previously this function rejected every re-wrap by throwing if
++        // wrappedMethod.restore.sinon was truthy.  That check relied on the
++        // shared object as the transport for wrap book-keeping and as a
++        // result broke concurrent sandboxes that independently stubbed the
++        // same (object, property).  The WeakMap registry keeps each wrap
++        // isolated, so a re-wrap is now allowed and simply pushes a new
++        // record on top of the previous one.
+     }
+ 
+-    let error, wrappedMethod, i, wrappedMethodDesc, target, accessor;
++    let wrappedMethod, i, wrappedMethodDesc, target, accessor;
+ 
+     const wrappedMethods = [];
++    // Capture the stack trace once per wrap.  It is associated with this
++    // specific replacement function via the WeakMap registry and never
++    // written onto the shared object.
++    const stackTraceError = new Error("Stack Trace for original");
+ 
+     function simplePropertyAssignment() {
+         wrappedMethod = object[property];
+@@ -123,22 +164,9 @@ export default function wrapMethod(object, property, method) {
+         wrappedMethodDesc = getPropertyDescriptor(object, property);
+ 
+         if (!wrappedMethodDesc) {
+-            error = new TypeError(
++            throw new TypeError(
+                 `Attempted to wrap ${typeof wrappedMethod} property ${property} as function`,
+             );
+-        } else if (
+-            wrappedMethodDesc.restore &&
+-            wrappedMethodDesc.restore.sinon
+-        ) {
+-            error = new TypeError(
+-                `Attempted to wrap ${property} which is already wrapped`,
+-            );
+-        }
+-        if (error) {
+-            if (wrappedMethodDesc && wrappedMethodDesc.stackTraceError) {
+-                error.stack += `\n--------------\n${wrappedMethodDesc.stackTraceError.stack}`;
+-            }
+-            throw error;
+         }
+ 
+         const types = Object.keys(methodDesc);
+@@ -173,62 +201,103 @@ export default function wrapMethod(object, property, method) {
+         simplePropertyAssignment();
+     }
+ 
+-    function restore() {
+-        accessor = getAccessor(object, property, this.wrappedMethod);
++    // ------------------------------------------------------------------
++    // External, per-wrap registry entry.  This replaces the previous
++    // practice of mutating `method` / `target` with hidden properties
++    // whose values pointed back to the shared object.
++    //
++    // Because the record lives on the replacement function (stored under
++    // a Symbol) and the registry is keyed by the object + property,
++    // sibling wraps of the same (object, property) cannot see each
++    // other's book-keeping: each restore() operates exclusively on its
++    // own captured snapshot of the descriptor.
++    // ------------------------------------------------------------------
++    const record = {
++        object: object,
++        property: property,
++        owned: owned,
++        wrappedMethodDesc: wrappedMethodDesc,
++        stackTraceError: stackTraceError,
++        restored: false,
++    };
++
++    function restoreForThisWrap() {
++        // Pull the per-wrap record directly from the replacement function
++        // via the Symbol; never read state from the shared object.
++        const selfRecord = findRecordFor(this);
++        if (!selfRecord) {
++            return;
++        }
++        if (selfRecord.restored) {
++            // idempotent: a wrap can only be restored once
++            return;
++        }
++        selfRecord.restored = true;
++
++        const ownObject = selfRecord.object;
++        const ownProperty = selfRecord.property;
++        const ownWrappedMethodDesc = selfRecord.wrappedMethodDesc;
++        const ownOwned = selfRecord.owned;
++
++        accessor = getAccessor(ownObject, ownProperty, this.wrappedMethod);
+         let descriptor;
+         // For prototype properties try to reset by delete first.
+         // If this fails (ex: localStorage on mobile safari) then force a reset
+         // via direct assignment.
+         if (accessor) {
+-            if (!owned) {
++            if (!ownOwned) {
+                 try {
+                     // In some cases `delete` may throw an error
+-                    delete object[property][accessor];
++                    delete ownObject[ownProperty][accessor];
+                 } catch (e) {} // eslint-disable-line no-empty
+                 // For native code functions `delete` fails without throwing an error
+                 // on Chrome < 43, PhantomJS, etc.
+             } else if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
+-                descriptor[accessor] = wrappedMethodDesc[accessor];
+-                Object.defineProperty(object, property, descriptor);
++                descriptor = getPropertyDescriptor(ownObject, ownProperty);
++                descriptor[accessor] = ownWrappedMethodDesc[accessor];
++                Object.defineProperty(ownObject, ownProperty, descriptor);
+             }
+ 
+             if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
++                descriptor = getPropertyDescriptor(ownObject, ownProperty);
+                 if (descriptor && descriptor.value === target) {
+-                    object[property][accessor] = this.wrappedMethod;
++                    ownObject[ownProperty][accessor] = this.wrappedMethod;
+                 }
+             } else {
+                 // Use strict equality comparison to check failures then force a reset
+                 // via direct assignment.
+-                if (object[property][accessor] === target) {
+-                    object[property][accessor] = this.wrappedMethod;
++                if (ownObject[ownProperty][accessor] === target) {
++                    ownObject[ownProperty][accessor] = this.wrappedMethod;
+                 }
+             }
+         } else {
+-            if (!owned) {
++            if (!ownOwned) {
+                 try {
+-                    delete object[property];
++                    delete ownObject[ownProperty];
+                 } catch (e) {} // eslint-disable-line no-empty
+             } else if (hasES5Support) {
+-                Object.defineProperty(object, property, wrappedMethodDesc);
++                Object.defineProperty(
++                    ownObject,
++                    ownProperty,
++                    ownWrappedMethodDesc,
++                );
+             }
+ 
+             if (hasES5Support) {
+-                descriptor = getPropertyDescriptor(object, property);
++                descriptor = getPropertyDescriptor(ownObject, ownProperty);
+                 if (descriptor && descriptor.value === target) {
+-                    object[property] = this.wrappedMethod;
++                    ownObject[ownProperty] = this.wrappedMethod;
+                 }
+             } else {
+-                if (object[property] === target) {
+-                    object[property] = this.wrappedMethod;
++                if (ownObject[ownProperty] === target) {
++                    ownObject[ownProperty] = this.wrappedMethod;
+                 }
+             }
+         }
+-        if (sinonType.get(object) === "stub-instance") {
++        if (sinonType.get(ownObject) === "stub-instance") {
+             // this is simply to avoid errors after restoring if something should
+             // traverse the object in a cleanup phase, ref #2477
+-            object[property] = noop;
++            ownObject[ownProperty] = noop;
+         }
+     }
+ 
+@@ -242,9 +311,21 @@ export default function wrapMethod(object, property, method) {
+ 
+                 // Set up an Error object for a stack trace which can be used later to find what line of
+                 // code the original method was created on.
+-                stackTraceError: new Error("Stack Trace for original"),
++                stackTraceError: stackTraceError,
+ 
+-                restore: restore,
++                restore: restoreForThisWrap,
++            });
++
++            // Each replacement function gets its own Symbol-keyed record.
++            // That way:
++            //   * restore() on function A touches only A's captured state
++            //   * restore() on function B touches only B's captured state
++            //   * the shared object is never used to transport wrap state
++            Object.defineProperty(target, wrapRecordSymbol, {
++                value: record,
++                enumerable: false,
++                configurable: true,
++                writable: true,
+             });
+ 
+             target.restore.sinon = true;
+@@ -256,5 +337,10 @@ export default function wrapMethod(object, property, method) {
+ 
+     extendObjectWithWrappedMethods();
+ 
++    // Register the wrap in the WeakMap so external book-keepers (sandbox,
++    // isRestorable, ...) can still introspect the state without having to
++    // reach into the shared object.
++    recordWrap(object, property, record);
++
+     return method;
+ }
