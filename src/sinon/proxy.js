@@ -254,85 +254,102 @@ function wrapFunction(func, originalFunc) {
         case 0:
             p = function proxy() {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                // new.target 是 ECMAScript 规范层面最可靠的 [[Construct]] 信号
+                // 当且仅当通过 new/super 调用时 new.target 才会被设置，
+                // 普通的 call/apply/bind([[Call]]) 路径下 new.target === undefined
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 1:
             p = function proxy(a) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 2:
             p = function proxy(a, b) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 3:
             p = function proxy(a, b, c) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 4:
             p = function proxy(a, b, c, d) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 5:
             p = function proxy(a, b, c, d, e) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 6:
             p = function proxy(a, b, c, d, e, f) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 7:
             p = function proxy(a, b, c, d, e, f, g) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 8:
             p = function proxy(a, b, c, d, e, f, g, h) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 9:
             p = function proxy(a, b, c, d, e, f, g, h, i) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 10:
             p = function proxy(a, b, c, d, e, f, g, h, i, j) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 11:
             p = function proxy(a, b, c, d, e, f, g, h, i, j, k) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         case 12:
             p = function proxy(a, b, c, d, e, f, g, h, i, j, k, l) {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         default:
             p = function proxy() {
                 "use strict";
-                return p.invoke(func, this, slice(arguments));
+                const isNew = typeof new.target !== "undefined";
+                return p.invoke(func, this, slice(arguments), isNew);
             };
             break;
         /*eslint-enable*/
@@ -384,7 +401,31 @@ export default function createProxy(func, originalFunc) {
     // Inherit function properties:
     extend(proxy, func);
 
-    proxy.prototype = func.prototype;
+    // 关键修复：
+    // 1. 只有当原函数本身具有非空 prototype 时才把 proxy.prototype 指向它。
+    //    ES2015 class 的 prototype 是不可写、不可配置、不可枚举的普通对象，
+    //    它同时承载了 instanceof 的 [[GetPrototypeOf]] 链；
+    // 2. 箭头函数 / 内置无构造函数的函数没有 prototype，保留 undefined，
+    //    这防止了 new proxy() 时引擎把一个默认 prototype 挂到实例上，
+    //    从而破坏 instanceof mod.MyClass 的判断；
+    // 3. 这也是 ECMAScript 规范对 [[Construct]] -> OrdinaryCreateFromConstructor
+    //    取出 constructor.prototype 作为实例 [[Prototype]] 的依赖点。
+    // 4. 对于 stub 场景下（createStub 中调用 createProxy(functionStub, originalFunc)）：
+    //    func 是 functionStub（它只是一个普通函数，其 prototype 是 Function 自带的 {}），
+    //    originalFunc 才是用户的 class/构造函数。此时必须以 originalFunc.prototype
+    //    为准，否则 instanceof OriginalClass 不会返回 true。
+    let prototypeSource = originalFunc || func;
+    const originalHasPrototype =
+        prototypeSource != null &&
+        typeof prototypeSource === "function" &&
+        "prototype" in prototypeSource;
+    if (originalHasPrototype && prototypeSource.prototype !== undefined) {
+        try {
+            proxy.prototype = prototypeSource.prototype;
+        } catch (e) {
+            // 某些严格模式下的冻结 prototype 会抛错，保持不破坏调用链即可。
+        }
+    }
 
     extend.nonEnum(proxy, proxyApi);
 
